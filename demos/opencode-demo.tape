@@ -11,18 +11,22 @@ Type "cd /Users/alex/projects/pi_agent_rust && clear"
 Enter
 Show
 
-Type "echo '=== pi-rust terraphim-router: API Demo ==='"
+Type "echo '╔════════════════════════════════════════════════════════════╗'"
+Enter
+Type "echo '║  Opencode Session - Analyzing pi-rust skill               ║'"
+Enter
+Type "echo '╚════════════════════════════════════════════════════════════╝'"
 Enter
 Sleep 1s
 
-Type "echo 'Running: extract_capabilities() + get_provider_for_capability()'"
+Type "opencode run 'Analyze pi_terraphim_router module'"
 Enter
-Sleep 500ms
+Sleep 2s
 
-Type "/tmp/route_demo"
+Type "cat /tmp/opencode_full_output.txt"
 Enter
-Sleep 8s
+Sleep 20s
 
-Type "echo '=== 11 capabilities mapped to optimal providers ==='"
+Type "echo '=== Opencode Analysis Complete ==='"
 Enter
 Sleep 1s

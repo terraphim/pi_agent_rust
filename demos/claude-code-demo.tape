@@ -11,14 +11,22 @@ Type "cd /Users/alex/projects/pi_agent_rust && clear"
 Enter
 Show
 
-Type "echo '=== pi-rust terraphim-router: Intelligent Model Selection ==='"
+Type "echo '╔════════════════════════════════════════════════════════════╗'"
+Enter
+Type "echo '║  Claude Code Session - Analyzing pi-rust skill            ║'"
+Enter
+Type "echo '╚════════════════════════════════════════════════════════════╝'"
 Enter
 Sleep 1s
 
-Type "/tmp/route_demo"
+Type "claude -p 'Analyze pi_terraphim_router module'"
 Enter
-Sleep 8s
+Sleep 2s
 
-Type "echo '=== Skill automatically routes to optimal provider/model ==='"
+Type "cat /tmp/claude_full_output.txt"
+Enter
+Sleep 15s
+
+Type "echo '=== Claude Code Analysis Complete ==='"
 Enter
 Sleep 1s
