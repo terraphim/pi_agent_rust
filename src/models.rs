@@ -2576,6 +2576,42 @@ mod tests {
     }
 
     #[test]
+    fn built_in_models_include_new_provider_seeds() {
+        let (_dir, auth) = test_auth_storage();
+        let built = built_in_models(&auth, ModelRegistryLoadMode::Full);
+
+        // GLM-5.1 seeds
+        assert!(
+            built.iter().any(|m| m.model.provider == "zai" && m.model.id == "glm-5.1"),
+            "zai/glm-5.1 should be in built-ins"
+        );
+        assert!(
+            built.iter().any(|m| m.model.provider == "zai-coding-plan" && m.model.id == "glm-5.1"),
+            "zai-coding-plan/glm-5.1 should be in built-ins"
+        );
+
+        // MiniMax M2.7 HighSpeed seeds
+        assert!(
+            built.iter().any(|m| m.model.provider == "minimax" && m.model.id == "minimax-m2.7-highspeed"),
+            "minimax/minimax-m2.7-highspeed should be in built-ins"
+        );
+        assert!(
+            built.iter().any(|m| m.model.provider == "minimax-coding-plan" && m.model.id == "minimax-m2.7-highspeed"),
+            "minimax-coding-plan/minimax-m2.7-highspeed should be in built-ins"
+        );
+
+        // Kimi K2.5 / K2.6 seeds
+        assert!(
+            built.iter().any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.5"),
+            "kimi-for-coding/kimi-k2.5 should be in built-ins"
+        );
+        assert!(
+            built.iter().any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.6"),
+            "kimi-for-coding/kimi-k2.6 should be in built-ins"
+        );
+    }
+
+    #[test]
     fn built_in_models_preserve_legacy_model_display_names() {
         let (_dir, auth) = test_auth_storage();
         let built = built_in_models(&auth, ModelRegistryLoadMode::Full);
