@@ -13,4 +13,4 @@ Show
 
 Type "./demos/claude-code-skill-demo.sh"
 Enter
-Sleep 22s
+Sleep 90s

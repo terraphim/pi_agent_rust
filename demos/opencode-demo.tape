@@ -13,4 +13,4 @@ Show
 
 Type "./demos/opencode-skill-demo.sh"
 Enter
-Sleep 22s
+Sleep 90s
