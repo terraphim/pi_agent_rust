@@ -832,13 +832,22 @@ const PROVIDER_DEFAULT_MODELS: &[(&str, &str)] = &[
     ("xai", "grok-4-fast-non-reasoning"),
     ("groq", "openai/gpt-oss-120b"),
     ("cerebras", "zai-glm-4.6"),
+    ("zai", "glm-5.1"),
     ("zai", "glm-4.7"),
+    ("zai-coding-plan", "glm-5.1"),
     ("zai-coding-plan", "glm-4.7"),
+    ("zhipuai", "glm-5.1"),
+    ("zhipuai", "glm-4.7"),
+    ("zhipuai-coding-plan", "glm-5.1"),
     ("zhipuai-coding-plan", "glm-4.7"),
     ("mistral", "devstral-medium-latest"),
+    ("minimax", "minimax-m2.7-highspeed"),
     ("minimax", "MiniMax-M2.7"),
+    ("minimax-cn", "minimax-m2.7-highspeed"),
     ("minimax-cn", "MiniMax-M2.7"),
+    ("minimax-coding-plan", "minimax-m2.7-highspeed"),
     ("minimax-coding-plan", "MiniMax-M2.7"),
+    ("minimax-cn-coding-plan", "minimax-m2.7-highspeed"),
     ("minimax-cn-coding-plan", "MiniMax-M2.7"),
     ("huggingface", "moonshotai/Kimi-K2.5"),
     ("opencode", "claude-opus-4-6"),
@@ -1477,8 +1486,8 @@ mod tests {
         // provider alone must synthesize an ad-hoc model from the default table
         // instead of failing with "No models available".
         for (provider_arg, expected_model_id) in [
-            ("zai-coding-plan", "glm-4.7"),
-            ("minimax-coding-plan", "MiniMax-M2.7"),
+            ("zai-coding-plan", "glm-5.1"),
+            ("minimax-coding-plan", "minimax-m2.7-highspeed"),
             ("kimi-for-coding", "kimi-for-coding"),
         ] {
             let cli = cli::Cli::parse_from(["pi", "--provider", provider_arg]);

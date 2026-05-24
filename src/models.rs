@@ -553,6 +553,26 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
                 slug: "google-antigravity/gemini-3-flash".to_string(),
                 description: Some("Gemini 3 Flash (Antigravity)".to_string()),
             });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "zai/glm-5.1".to_string(),
+                description: Some("GLM-5.1".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "zhipuai/glm-5.1".to_string(),
+                description: Some("GLM-5.1".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "minimax/minimax-m2.7-highspeed".to_string(),
+                description: Some("MiniMax M2.7 HighSpeed".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "kimi-for-coding/kimi-k2.5".to_string(),
+                description: Some("Kimi K2.5".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "kimi-for-coding/kimi-k2.6".to_string(),
+                description: Some("Kimi K2.6".to_string()),
+            });
             candidates.sort_by_key(|candidate| candidate.slug.to_ascii_lowercase());
             candidates.dedup_by(|a, b| a.slug.eq_ignore_ascii_case(&b.slug));
             candidates
@@ -796,6 +816,9 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
         "o1",
         "o3",
         "o4",
+        "glm-",
+        "kimi-",
+        "minimax-",
     ]
     .iter()
     .find_map(|needle| raw_id.find(needle).map(|idx| &raw_id[idx..]))
@@ -867,6 +890,36 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
 
     // Meta Llama: no reasoning support.
     if id.starts_with("llama") {
+        return Some(false);
+    }
+
+    // Zhipu GLM: glm-5+ are reasoning; glm-4.x are not.
+    if id.starts_with("glm-5") {
+        return Some(true);
+    }
+    if id.starts_with("glm-4") {
+        return Some(false);
+    }
+
+    // Kimi: kimi-k2.5+ are reasoning; kimi-k2 and below are not.
+    if id.starts_with("kimi-k2.5") || id.starts_with("kimi-k2.6") || id.starts_with("kimi-k3") {
+        return Some(true);
+    }
+    if id.starts_with("kimi-k2") && !id.starts_with("kimi-k2.5") && !id.starts_with("kimi-k2.6") {
+        return Some(false);
+    }
+
+    // MiniMax: minimax-m2.5+ are reasoning; m2 and m2.1 are not.
+    if id.starts_with("minimax-m2.5")
+        || id.starts_with("minimax-m2.7")
+        || id.starts_with("minimax-m3")
+    {
+        return Some(true);
+    }
+    if id.starts_with("minimax-m2")
+        && !id.starts_with("minimax-m2.5")
+        && !id.starts_with("minimax-m2.7")
+    {
         return Some(false);
     }
 
@@ -1649,6 +1702,162 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             compat: None,
             oauth_config: None,
         });
+    }
+
+    // Zhipu GLM-5.1 (including ZhipuAI and coding-plan variants).
+    for (provider, base_url) in [
+        ("zai", "https://api.z.ai/api/paas/v4"),
+        ("zai-coding-plan", "https://api.z.ai/api/coding/paas/v4"),
+        ("zhipuai", "https://open.bigmodel.cn/api/paas/v4"),
+        ("zhipuai-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4"),
+    ] {
+        if !models
+            .iter()
+            .any(|entry| entry.model.provider == provider && entry.model.id == "glm-5.1")
+        {
+            models.push(ModelEntry {
+                model: Model {
+                    id: "glm-5.1".to_string(),
+                    name: "GLM-5.1".to_string(),
+                    api: if mode == ModelRegistryLoadMode::Full {
+                        Api::OpenAICompletions.to_string()
+                    } else {
+                        "openai-completions".to_string()
+                    },
+                    provider: provider.to_string(),
+                    base_url: if mode == ModelRegistryLoadMode::Full {
+                        base_url.to_string()
+                    } else {
+                        String::new()
+                    },
+                    reasoning: true,
+                    input: vec![InputType::Text, InputType::Image],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 262_144,
+                    max_tokens: 32_768,
+                    headers: HashMap::new(),
+                },
+                api_key: resolve_provider_api_key_cached(
+                    auth,
+                    provider,
+                    provider,
+                    &mut canonical_api_key_cache,
+                    &mut provider_api_key_cache,
+                ),
+                headers: HashMap::new(),
+                auth_header: true,
+                compat: None,
+                oauth_config: None,
+            });
+        }
+    }
+
+    // MiniMax M2.7 HighSpeed (including coding-plan variants).
+    for (provider, base_url) in [
+        ("minimax", "https://api.minimax.io/anthropic/v1/messages"),
+        ("minimax-cn", "https://api.minimaxi.com/anthropic/v1/messages"),
+        ("minimax-coding-plan", "https://api.minimax.io/anthropic/v1/messages"),
+        ("minimax-cn-coding-plan", "https://api.minimaxi.com/anthropic/v1/messages"),
+    ] {
+        if !models.iter().any(|entry| {
+            entry.model.provider == provider && entry.model.id == "minimax-m2.7-highspeed"
+        }) {
+            models.push(ModelEntry {
+                model: Model {
+                    id: "minimax-m2.7-highspeed".to_string(),
+                    name: "MiniMax M2.7 HighSpeed".to_string(),
+                    api: if mode == ModelRegistryLoadMode::Full {
+                        Api::AnthropicMessages.to_string()
+                    } else {
+                        "anthropic-messages".to_string()
+                    },
+                    provider: provider.to_string(),
+                    base_url: if mode == ModelRegistryLoadMode::Full {
+                        base_url.to_string()
+                    } else {
+                        String::new()
+                    },
+                    reasoning: true,
+                    input: vec![InputType::Text],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 262_144,
+                    max_tokens: 32_768,
+                    headers: HashMap::new(),
+                },
+                api_key: resolve_provider_api_key_cached(
+                    auth,
+                    provider,
+                    provider,
+                    &mut canonical_api_key_cache,
+                    &mut provider_api_key_cache,
+                ),
+                headers: HashMap::new(),
+                auth_header: false,
+                compat: None,
+                oauth_config: None,
+            });
+        }
+    }
+
+    // Kimi for Coding K2.5 and K2.6.
+    for model_id in ["kimi-k2.5", "kimi-k2.6"] {
+        if !models.iter().any(|entry| {
+            entry.model.provider == "kimi-for-coding" && entry.model.id == model_id
+        }) {
+            models.push(ModelEntry {
+                model: Model {
+                    id: model_id.to_string(),
+                    name: if model_id == "kimi-k2.5" {
+                        "Kimi K2.5".to_string()
+                    } else {
+                        "Kimi K2.6".to_string()
+                    },
+                    api: if mode == ModelRegistryLoadMode::Full {
+                        Api::AnthropicMessages.to_string()
+                    } else {
+                        "anthropic-messages".to_string()
+                    },
+                    provider: "kimi-for-coding".to_string(),
+                    base_url: if mode == ModelRegistryLoadMode::Full {
+                        "https://api.kimi.com/coding/v1/messages".to_string()
+                    } else {
+                        String::new()
+                    },
+                    reasoning: true,
+                    input: vec![InputType::Text, InputType::Image],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 262_144,
+                    max_tokens: 32_768,
+                    headers: HashMap::new(),
+                },
+                api_key: resolve_provider_api_key_cached(
+                    auth,
+                    "kimi-for-coding",
+                    "kimi-for-coding",
+                    &mut canonical_api_key_cache,
+                    &mut provider_api_key_cache,
+                ),
+                headers: HashMap::new(),
+                auth_header: false,
+                compat: None,
+                oauth_config: None,
+            });
+        }
     }
 
     // Sort for deterministic find_by_id: canonical providers first, then alphabetical.
@@ -4517,6 +4726,24 @@ mod tests {
         // Meta Llama
         assert_eq!(model_is_reasoning("llama-3.3-70b-versatile"), Some(false));
         assert_eq!(model_is_reasoning("llama-4-scout"), Some(false));
+
+        // Zhipu GLM
+        assert_eq!(model_is_reasoning("glm-5.1"), Some(true));
+        assert_eq!(model_is_reasoning("glm-5"), Some(true));
+        assert_eq!(model_is_reasoning("glm-4.7"), Some(false));
+        assert_eq!(model_is_reasoning("glm-4.6"), Some(false));
+
+        // Kimi
+        assert_eq!(model_is_reasoning("kimi-k2.6"), Some(true));
+        assert_eq!(model_is_reasoning("kimi-k2.5"), Some(true));
+        assert_eq!(model_is_reasoning("kimi-k2-thinking"), Some(false));
+        assert_eq!(model_is_reasoning("kimi-k2-0905"), Some(false));
+
+        // MiniMax
+        assert_eq!(model_is_reasoning("minimax-m2.7-highspeed"), Some(true));
+        assert_eq!(model_is_reasoning("minimax-m2.5"), Some(true));
+        assert_eq!(model_is_reasoning("minimax-m2.1"), Some(false));
+        assert_eq!(model_is_reasoning("minimax-m2"), Some(false));
 
         // Unknown models return None (fall back to provider default)
         assert_eq!(model_is_reasoning("some-custom-model"), None);
