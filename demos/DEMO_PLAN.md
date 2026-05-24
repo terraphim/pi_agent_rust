@@ -1,107 +1,83 @@
 # Demo Video Creation Plan
 
-## Based on RLM Demo Learnings
+## Integrity Rule
 
-### Tool Choice: VHS
-- **Winner**: VHS over asciinema+agg and Remotion
-- **Why**: Fully deterministic, declarative .tape files, readable source, single command to render
-- **Version**: vhs 0.11.0 (installed at /opt/homebrew/bin/vhs)
+**All demos must use real, captured output. No fabrication, no hardcoded echo, no static cat heredocs.**
+If a demo step cannot produce real output at recording time, it must be removed.
 
-### Theme: Monokai Remastered
-- **Background**: Near-black #0C0C0C
-- **Why**: Highest contrast for feed previews, smallest GIF size (compression-friendly)
-- **VHS Setting**: `Set Theme { "name": "monokai", "background": "#0C0C0C" }`
+## Tool Choice: VHS
 
-### Content Style: Real Captured Output
-- **Rule**: Use actual tmux session output, not staging or fabrication
-- **Source**: 
-  - `tmux:claude_demo` - Claude Code session output
-  - `tmux:opencode_demo` - Opencode session output
-- **Method**: Export tmux buffer to file, replay via VHS `Type` and `Sleep` commands
+- **Why**: Deterministic, declarative `.tape` files, single command to render
+- **Version**: vhs 0.11.0 (`/opt/homebrew/bin/vhs`)
+- **Theme**: Monokai, background `#0C0C0C`
+- **Playback**: 1.4-1.6x speed, 16ms typing, 1280x720
 
-### Playback Settings
-- **Speed**: ~1.4-1.5x (fast enough to hold attention, slow enough to read)
-- **Typing Speed**: 18-22ms per character
-- **Resolution**: 1280x720 or 1280x800
-- **Output**: .gif for social media, .mp4 for documentation
+## Demo 1: Dynamic Routing (primary demo)
 
-## Current Recommended Demo: Dynamic Routing
+**Status: Working. Calls real `pi demo-route --format json`.**
 
-### Script Structure
-1. **Intro**: Show this is pi-rust dynamic model routing, not an agent wrapper demo
-2. **Version**: Show the release `pi` binary in PATH
-3. **Same command, different prompts**: Run `pi demo-route` four times
-4. **Visible routing proof**: Show each prompt selecting a different specialist model
-   - Deep reasoning -> `kimi-for-coding/kimi-k2.6`
-   - Security audit -> `anthropic/claude-sonnet-4-6`
-   - Test generation -> `openai-codex/gpt-5.3-codex-spark`
-   - Architecture -> `anthropic/claude-opus-4-6`
-5. **Outro**: State that model choice comes from the prompt, not a fixed CLI flag
+| File | Description |
+|------|-------------|
+| `demos/dynamic-routing-demo.sh` | Runs `pi demo-route` with 4 different prompts |
+| `demos/dynamic-routing-demo.tape` | VHS tape file |
 
-### Tape File: `demos/dynamic-routing-demo.tape`
+**Prerequisites**: `pi` binary in PATH (built with `terraphim-routing` feature).
 
-### Generated Output: `demos/dynamic-routing-demo.gif`
+**What it demonstrates**: Same command, different prompts, different specialist models selected automatically.
 
-## Real Client Demo 1: Claude Code + pi-rust-terraphim-router
+## Demo 2: Claude Code + pi-rust terraphim-router
 
-### Script Structure
-1. Verify `~/.claude/skills/pi-rust-terraphim-router/SKILL.md` exists
-2. Show the release `pi` binary version
-3. Run real Claude Code non-interactively with the skill instruction
-4. Claude Code executes `pi demo-route --format json` via allowed Bash tool
-5. Output shows selected provider/model for a testing prompt
+**Status: Working. Runs real `cargo test` commands.**
 
-### Tape File: `demos/claude-code-demo.tape`
+| File | Description |
+|------|-------------|
+| `demos/claude-code-demo.sh` | Builds + runs all 16 terraphim-router tests |
+| `demos/claude-code-demo.tape` | VHS tape file (calls `claude-code-skill-demo.sh`) |
 
-### Generated Output: `demos/claude-code-demo.gif`
+**Prerequisites**: Local build with `terraphim-routing` feature; sibling `terraphim_router`/`terraphim_types` crates available.
 
-## Real Client Demo 2: Opencode + pi-rust-terraphim-router
+**What it demonstrates**: Test suite for the terraphim-router module (extractor, mapper, RPC client).
 
-### Script Structure
-1. Verify `~/.config/opencode/skill/pi-rust-terraphim-router/SKILL.md` exists
-2. Show the release `pi` binary version
-3. Run real Opencode non-interactively with the skill instruction
-4. Opencode discovers `Skill "pi-rust-terraphim-router"`
-5. Output shows selected provider/model for an architecture prompt
+**Note**: The `.tape` file calls `claude-code-skill-demo.sh` which requires the external `claude` CLI. GIF re-recording needs `claude` installed and authenticated.
 
-### Tape File: `demos/opencode-demo.tape`
+## Demo 3: Opencode + pi-rust terraphim-router
 
-### Generated Output: `demos/opencode-demo.gif`
+**Status: Working. Runs real `cargo test` and `cargo build` commands.**
 
-## Legacy Demo Notes: Claude Code + pi-rust terraphim-router
+| File | Description |
+|------|-------------|
+| `demos/opencode-demo.sh` | Verifies module structure + runs test suite |
+| `demos/opencode-demo.tape` | VHS tape file (calls `opencode-skill-demo.sh`) |
 
-### Script Structure
-1. **Intro** (3s): Show terminal with project path
-2. **Build** (5s): `cargo build --features terraphim-routing`
-3. **Tests** (8s): Run all 16 tests with checkmarks
-4. **Capability Extraction** (15s): Show 8 prompts with extracted capabilities
-5. **Provider Mapping** (12s): Show routing decisions with confidence scores
-6. **Outro** (3s): Summary of features
+**Prerequisites**: Same as Demo 2.
 
-### Tape File: `demos/claude-code-demo.tape`
+**What it demonstrates**: Module structure, build, and test verification for terraphim-router.
 
-## Demo 2: Opencode + pi-rust terraphim-router
+**Note**: The `.tape` file calls `opencode-skill-demo.sh` which requires the external `opencode` CLI. GIF re-recording needs `opencode` installed.
 
-### Script Structure
-1. **Intro** (3s): Show terminal with feature flag verification
-2. **API Surface** (10s): Show all 3 public APIs
-3. **Performance** (8s): Show microsecond-level benchmarks
-4. **Provider Map** (10s): Show capability-to-provider table
-5. **Outro** (3s): Call to action
+## Removed Files (2026-05-24 cleanup)
 
-### Tape File: `demos/opencode-demo.tape`
+These files were fabricated (hardcoded output, fake performance numbers, static heredocs):
 
-## Execution Steps
+- `demos/claude_session.sh` — 100% fake `cat` heredoc
+- `demos/route_demo.sh` — hardcoded `echo` statements
+- `demos/DEMO_TRANSCRIPTS.md` — fabricated transcripts with fake numbers
+- `demos/claude-code-demo.gif` — unverifiable, needs re-recording
+- `demos/opencode-demo.gif` — unverifiable, needs re-recording
+- `demos/dynamic-routing-demo.gif` — unverifiable, needs re-recording
 
-1. **Export tmux output** to text files
-2. **Create .tape files** with real output
-3. **Render with VHS**: `vhs demos/claude-code-demo.tape`
-4. **Verify output** (GIF/MP4 quality)
-5. **Commit** tape files and generated demos
+## GIF Re-recording
 
-## Files to Create
+To regenerate GIFs from real sessions:
 
-- `demos/claude-code-demo.tape` - VHS tape for Claude Code demo
-- `demos/opencode-demo.tape` - VHS tape for Opencode demo
-- `demos/claude-code-demo.gif` - Generated GIF
-- `demos/opencode-demo.gif` - Generated GIF
+```bash
+# Requires VHS installed: brew install vhs
+# Dynamic routing (self-contained, just needs pi in PATH)
+vhs demos/dynamic-routing-demo.tape
+
+# Claude Code skill demo (needs claude CLI + pi in PATH)
+vhs demos/claude-code-demo.tape
+
+# Opencode skill demo (needs opencode CLI + pi in PATH)
+vhs demos/opencode-demo.tape
+```

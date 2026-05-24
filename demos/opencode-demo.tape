@@ -11,6 +11,6 @@ Type "cd /Users/alex/projects/pi_agent_rust && clear"
 Enter
 Show
 
-Type "./demos/opencode-skill-demo.sh"
+Type "./demos/opencode-demo.sh"
 Enter
-Sleep 90s
+Sleep 120s
