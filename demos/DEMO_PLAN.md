@@ -42,7 +42,33 @@
 
 ### Generated Output: `demos/dynamic-routing-demo.gif`
 
-## Legacy Demo 1: Claude Code + pi-rust terraphim-router
+## Real Client Demo 1: Claude Code + pi-rust-terraphim-router
+
+### Script Structure
+1. Verify `~/.claude/skills/pi-rust-terraphim-router/SKILL.md` exists
+2. Show the release `pi` binary version
+3. Run real Claude Code non-interactively with the skill instruction
+4. Claude Code executes `pi demo-route --format json` via allowed Bash tool
+5. Output shows selected provider/model for a testing prompt
+
+### Tape File: `demos/claude-code-demo.tape`
+
+### Generated Output: `demos/claude-code-demo.gif`
+
+## Real Client Demo 2: Opencode + pi-rust-terraphim-router
+
+### Script Structure
+1. Verify `~/.config/opencode/skill/pi-rust-terraphim-router/SKILL.md` exists
+2. Show the release `pi` binary version
+3. Run real Opencode non-interactively with the skill instruction
+4. Opencode discovers `Skill "pi-rust-terraphim-router"`
+5. Output shows selected provider/model for an architecture prompt
+
+### Tape File: `demos/opencode-demo.tape`
+
+### Generated Output: `demos/opencode-demo.gif`
+
+## Legacy Demo Notes: Claude Code + pi-rust terraphim-router
 
 ### Script Structure
 1. **Intro** (3s): Show terminal with project path
