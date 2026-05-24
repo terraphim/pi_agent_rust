@@ -144,6 +144,11 @@ path = "examples/test_infinite_loop.rs"
 name = "test_time"
 path = "examples/test_time.rs"
 
+[[example]]
+name = "terraphim_router"
+path = "examples/terraphim_router.rs"
+required-features = ["terraphim-routing"]
+
 [dependencies]
 # CLI
 clap = { version = "4.5.60", features = ["derive", "env", "string"] }

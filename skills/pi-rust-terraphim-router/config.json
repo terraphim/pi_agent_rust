@@ -1,0 +1,67 @@
+{
+  "name": "pi-rust-terraphim-router",
+  "version": "0.1.0",
+  "description": "Intelligent model selection for pi-rust using Terraphim keyword routing",
+  "author": "Terraphim Team",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/Dicklesworthstone/pi_agent_rust",
+  "keywords": ["pi-rust", "terraphim", "routing", "model-selection", "llm"],
+  "categories": ["ai", "routing", "cli"],
+  "feature_flag": "terraphim-routing",
+  "entry_points": {
+    "rust": {
+      "module": "pi::pi_terraphim_router",
+      "functions": [
+        "route_and_execute",
+        "extract_capabilities",
+        "get_provider_for_capability"
+      ]
+    }
+  },
+  "capabilities": [
+    "DeepThinking",
+    "FastThinking",
+    "CodeGeneration",
+    "CodeReview",
+    "Architecture",
+    "Testing",
+    "Refactoring",
+    "Documentation",
+    "Explanation",
+    "SecurityAudit",
+    "Performance"
+  ],
+  "providers": {
+    "anthropic": {
+      "models": ["claude-opus-4-6", "claude-sonnet-4-6"],
+      "env_var": "ANTHROPIC_API_KEY"
+    },
+    "openai-codex": {
+      "models": ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"],
+      "env_var": "OPENAI_API_KEY"
+    },
+    "kimi-for-coding": {
+      "models": ["kimi-k2.6", "kimi-k2.5"],
+      "env_var": "KIMI_API_KEY"
+    },
+    "google": {
+      "models": ["gemini-3-flash"],
+      "env_var": "GOOGLE_API_KEY"
+    },
+    "zai": {
+      "models": ["glm-5.1"],
+      "env_var": "ZAI_API_KEY"
+    }
+  },
+  "performance": {
+    "capability_extraction_ms": 1,
+    "provider_mapping_ms": 1,
+    "rpc_spawn_ms": 100,
+    "total_overhead_ms": 100
+  },
+  "testing": {
+    "unit_tests": 16,
+    "integration_tests": 0,
+    "coverage_target": 80
+  }
+}
