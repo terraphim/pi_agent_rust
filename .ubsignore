@@ -1,5 +1,7 @@
 target/
 target-*/
+.target/
+.target-*/
 legacy_pi_mono_code/
 .ruff_cache/
 .git/

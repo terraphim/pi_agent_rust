@@ -1,3 +1,11 @@
+---
+name: pi-rust-terraphim-router
+description: >-
+  Route a prompt through pi-rust's terraphim-router before choosing a model.
+  Use when a Claude Code or Opencode session should delegate a user request to
+  pi-rust with dynamic provider/model selection instead of a fixed model.
+---
+
 # Skill: pi-rust-terraphim-router
 
 Intelligent model selection for pi-rust using Terraphim's keyword-based routing engine. Automatically routes prompts to the optimal LLM provider based on prompt intent.
@@ -5,6 +13,44 @@ Intelligent model selection for pi-rust using Terraphim's keyword-based routing 
 ## When to Use
 
 Use this skill when you want pi-rust to automatically select the best model for a given prompt rather than using a fixed model. The router extracts capabilities from the prompt and maps them to the optimal provider/model combination.
+
+Use it from Claude Code or Opencode when the user asks for:
+
+- Dynamic model routing
+- Prompt-dependent model selection
+- Delegating work to `pi-rust`
+- Demonstrating the new Terraphim routing function
+- Comparing which model would handle different prompts
+
+## Claude Code / Opencode Workflow
+
+1. Verify the release binary is available:
+
+   ```bash
+   pi --version
+   ```
+
+2. Route the user prompt through pi-rust:
+
+   ```bash
+   pi demo-route --format json "<prompt>"
+   ```
+
+3. Read the `providers` list and select the top route for execution or explanation.
+
+4. If the user wants demonstration evidence, run:
+
+   ```bash
+   ./demos/dynamic-routing-demo.sh
+   ```
+
+5. If the user wants the GIF artefact, render:
+
+   ```bash
+   vhs demos/dynamic-routing-demo.tape
+   ```
+
+Do not present this as a Claude Code or Opencode native model switch. The skill delegates routing to `pi-rust`; the current assistant process may still be running on its originally configured model.
 
 ## Activation
 
