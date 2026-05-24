@@ -11,22 +11,49 @@ Type "cd /Users/alex/projects/pi_agent_rust && clear"
 Enter
 Show
 
-Type "echo '╔════════════════════════════════════════════════════════════╗'"
-Enter
-Type "echo '║  Opencode Session - Analyzing pi-rust skill               ║'"
-Enter
-Type "echo '╚════════════════════════════════════════════════════════════╝'"
+Type "echo '=== Opencode + pi-rust terraphim-router ==='"
 Enter
 Sleep 1s
 
-Type "opencode run 'Analyze pi_terraphim_router module'"
+Type "echo '[User] Write comprehensive tests for this module'"
 Enter
-Sleep 2s
-
-Type "cat /tmp/opencode_full_output.txt"
+Sleep 500ms
+Type "echo '[Opencode] Detecting capabilities...'"
 Enter
-Sleep 20s
+Sleep 500ms
 
-Type "echo '=== Opencode Analysis Complete ==='"
+Type "pi demo-route 'Write comprehensive tests'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '[User] Design a microservices architecture'"
+Enter
+Sleep 500ms
+Type "echo '[Opencode] Routing to architecture specialist...'"
+Enter
+Sleep 500ms
+
+Type "pi demo-route 'Design a microservices architecture'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '[User] Optimize this slow database query'"
+Enter
+Sleep 500ms
+Type "echo '[Opencode] Routing to performance optimizer...'"
+Enter
+Sleep 500ms
+
+Type "pi demo-route 'Optimize this slow database query'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '=== Opencode routes tasks to optimal specialists ==='"
 Enter
 Sleep 1s

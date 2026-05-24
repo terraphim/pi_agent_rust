@@ -11,22 +11,49 @@ Type "cd /Users/alex/projects/pi_agent_rust && clear"
 Enter
 Show
 
-Type "echo '╔════════════════════════════════════════════════════════════╗'"
-Enter
-Type "echo '║  Claude Code Session - Analyzing pi-rust skill            ║'"
-Enter
-Type "echo '╚════════════════════════════════════════════════════════════╝'"
+Type "echo '=== Claude Code + pi-rust terraphim-router ==='"
 Enter
 Sleep 1s
 
-Type "claude -p 'Analyze pi_terraphim_router module'"
+Type "echo '[User] Implement a secure authentication system'"
 Enter
-Sleep 2s
-
-Type "cat /tmp/claude_full_output.txt"
+Sleep 500ms
+Type "echo '[Claude Code] Analyzing with terraphim-router...'"
 Enter
-Sleep 15s
+Sleep 500ms
 
-Type "echo '=== Claude Code Analysis Complete ==='"
+Type "pi demo-route 'Implement a secure authentication system'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '[User] Think carefully about this complex algorithm'"
+Enter
+Sleep 500ms
+Type "echo '[Claude Code] Routing to deep thinking model...'"
+Enter
+Sleep 500ms
+
+Type "pi demo-route 'Think carefully about this complex algorithm'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '[User] Audit this code for security vulnerabilities'"
+Enter
+Sleep 500ms
+Type "echo '[Claude Code] Routing to security specialist...'"
+Enter
+Sleep 500ms
+
+Type "pi demo-route 'Audit this code for security vulnerabilities'"
+Enter
+Sleep 4s
+
+Type "echo ''"
+Enter
+Type "echo '=== Claude Code routes tasks to optimal models ==='"
 Enter
 Sleep 1s

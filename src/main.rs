@@ -1858,6 +1858,14 @@ async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
         cli::Commands::Migrate { path, dry_run } => {
             handle_session_migrate(&path, dry_run)?;
         }
+        #[cfg(feature = "terraphim-routing")]
+        cli::Commands::DemoRoute { prompt, format } => {
+            handle_demo_route(&prompt, &format)?;
+        }
+        #[cfg(not(feature = "terraphim-routing"))]
+        cli::Commands::DemoRoute { .. } => {
+            bail!("terraphim-routing feature not enabled. Build with: cargo build --features terraphim-routing");
+        }
     }
 
     Ok(())
@@ -8273,4 +8281,64 @@ mod tests {
             render_model_table_for_test(&borrowed)
         );
     }
+}
+
+#[cfg(feature = "terraphim-routing")]
+fn handle_demo_route(prompt: &str, format: &str) -> Result<()> {
+    use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
+
+    let caps = extract_capabilities(prompt);
+
+    if format == "json" {
+        let mut providers = Vec::new();
+        for cap in &caps {
+            if let Some(sel) = get_provider_for_capability(cap) {
+                providers.push(serde_json::json!({
+                    "capability": cap,
+                    "provider": sel.provider,
+                    "model": sel.model,
+                    "confidence": sel.confidence
+                }));
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "prompt": prompt,
+                "capabilities": caps,
+                "providers": providers
+            })
+        );
+    } else {
+        println!("╔════════════════════════════════════════════════════════════╗");
+        println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
+        println!("╚════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("Prompt: {}", prompt);
+        println!();
+
+        if caps.is_empty() {
+            println!("  No capabilities detected. Using fallback provider.");
+            println!("  → openai-codex/gpt-5.5");
+        } else {
+            println!("  Detected capabilities:");
+            for cap in &caps {
+                println!("    • {}", cap);
+            }
+            println!();
+            println!("  Provider routing:");
+            for cap in &caps {
+                if let Some(sel) = get_provider_for_capability(cap) {
+                    println!(
+                        "    → {}: {}/{} (confidence: {:.2})",
+                        cap, sel.provider, sel.model, sel.confidence
+                    );
+                }
+            }
+        }
+        println!();
+        println!("════════════════════════════════════════════════════════════");
+    }
+
+    Ok(())
 }

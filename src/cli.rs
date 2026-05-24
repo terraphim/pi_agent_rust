@@ -1980,6 +1980,16 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Demonstrate terraphim-router skill: extract capabilities and route prompts
+    #[command(name = "demo-route")]
+    DemoRoute {
+        /// Prompt to analyze and route
+        prompt: String,
+        /// Output format: text (default) or json
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
