@@ -43,6 +43,7 @@ const ROOT_SUBCOMMANDS: &[&str] = &[
     "config",
     "doctor",
     "migrate",
+    "demo-route",
 ];
 
 fn known_long_option(name: &str) -> Option<LongOptionSpec> {
@@ -958,6 +959,25 @@ mod tests {
             return Err(format!("unexpected command: {:?}", cli.command));
         };
         assert_eq!(name, "auto-commit-on-exit");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_demo_route_format_survives_extension_preprocessing() -> Result<(), String> {
+        let parsed = parse_with_extension_flags(vec![
+            "pi".into(),
+            "demo-route".into(),
+            "--format".into(),
+            "json".into(),
+            "Write comprehensive unit tests".into(),
+        ])
+        .map_err(|err| err.to_string())?;
+        let Some(Commands::DemoRoute { prompt, format }) = parsed.cli.command else {
+            return Err(format!("unexpected command: {:?}", parsed.cli.command));
+        };
+        assert_eq!(prompt, "Write comprehensive unit tests");
+        assert_eq!(format, "json");
+        assert!(parsed.extension_flags.is_empty());
         Ok(())
     }
 

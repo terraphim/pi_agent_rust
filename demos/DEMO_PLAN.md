@@ -25,7 +25,24 @@
 - **Resolution**: 1280x720 or 1280x800
 - **Output**: .gif for social media, .mp4 for documentation
 
-## Demo 1: Claude Code + pi-rust terraphim-router
+## Current Recommended Demo: Dynamic Routing
+
+### Script Structure
+1. **Intro**: Show this is pi-rust dynamic model routing, not an agent wrapper demo
+2. **Version**: Show the release `pi` binary in PATH
+3. **Same command, different prompts**: Run `pi demo-route` four times
+4. **Visible routing proof**: Show each prompt selecting a different specialist model
+   - Deep reasoning -> `kimi-for-coding/kimi-k2.6`
+   - Security audit -> `anthropic/claude-sonnet-4-6`
+   - Test generation -> `openai-codex/gpt-5.3-codex-spark`
+   - Architecture -> `anthropic/claude-opus-4-6`
+5. **Outro**: State that model choice comes from the prompt, not a fixed CLI flag
+
+### Tape File: `demos/dynamic-routing-demo.tape`
+
+### Generated Output: `demos/dynamic-routing-demo.gif`
+
+## Legacy Demo 1: Claude Code + pi-rust terraphim-router
 
 ### Script Structure
 1. **Intro** (3s): Show terminal with project path

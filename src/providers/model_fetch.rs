@@ -82,7 +82,7 @@ fn cache_disabled() -> bool {
 
 fn cache_key(provider: &str) -> String {
     canonical_provider_id(provider)
-        .unwrap_or(provider.trim())
+        .unwrap_or_else(|| provider.trim())
         .to_ascii_lowercase()
 }
 
@@ -90,8 +90,11 @@ fn cache_lookup(key: &str) -> Option<Vec<String>> {
     let guard = cache().lock().ok()?;
     let entry = guard.get(key)?;
     if entry.inserted.elapsed() < MODEL_CACHE_TTL {
-        Some(entry.models.clone())
+        let models = entry.models.clone();
+        drop(guard);
+        Some(models)
     } else {
+        drop(guard);
         None
     }
 }
@@ -118,9 +121,7 @@ pub fn clear_model_cache() {
 }
 
 /// Fetch the live model catalog for `provider`, returning cached results when
-/// fresh.  On any failure to talk to the provider, fall back to the bundled
-/// static registry and log a warning so operators can see why the dynamic
-/// path degraded.
+/// fresh.
 ///
 /// `api_key` should be the user's credential for the provider; when empty,
 /// the fetch is skipped immediately and the static registry result is used.
@@ -178,6 +179,7 @@ async fn fetch_and_cache(provider: &str, key: &str, api_key: &str) -> Result<Vec
 }
 
 /// Return the static model IDs known to the bundled registry for `provider`.
+///
 /// Used as the fallback when a live fetch fails.  Loads the on-disk
 /// `models.json` (if any) so user-defined catalog overrides are honoured.
 pub fn static_registry_models(provider: &str) -> Vec<String> {

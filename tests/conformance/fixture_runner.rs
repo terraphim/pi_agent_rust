@@ -390,6 +390,11 @@ fn command_value(command: Option<&Commands>) -> Value {
             "path": path,
             "dry_run": dry_run,
         }),
+        Some(Commands::DemoRoute { prompt, format }) => json!({
+            "name": "demo-route",
+            "prompt": prompt,
+            "format": format,
+        }),
         None => Value::Null,
     }
 }

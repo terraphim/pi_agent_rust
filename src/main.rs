@@ -1860,11 +1860,13 @@ async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
         }
         #[cfg(feature = "terraphim-routing")]
         cli::Commands::DemoRoute { prompt, format } => {
-            handle_demo_route(&prompt, &format)?;
+            handle_demo_route(&prompt, &format);
         }
         #[cfg(not(feature = "terraphim-routing"))]
         cli::Commands::DemoRoute { .. } => {
-            bail!("terraphim-routing feature not enabled. Build with: cargo build --features terraphim-routing");
+            bail!(
+                "terraphim-routing feature not enabled. Build with: cargo build --features terraphim-routing"
+            );
         }
     }
 
@@ -8284,7 +8286,8 @@ mod tests {
 }
 
 #[cfg(feature = "terraphim-routing")]
-fn handle_demo_route(prompt: &str, format: &str) -> Result<()> {
+#[allow(clippy::items_after_test_module)]
+fn handle_demo_route(prompt: &str, format: &str) {
     use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
 
     let caps = extract_capabilities(prompt);
@@ -8314,7 +8317,7 @@ fn handle_demo_route(prompt: &str, format: &str) -> Result<()> {
         println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
         println!("╚════════════════════════════════════════════════════════════╝");
         println!();
-        println!("Prompt: {}", prompt);
+        println!("Prompt: {prompt}");
         println!();
 
         if caps.is_empty() {
@@ -8323,7 +8326,7 @@ fn handle_demo_route(prompt: &str, format: &str) -> Result<()> {
         } else {
             println!("  Detected capabilities:");
             for cap in &caps {
-                println!("    • {}", cap);
+                println!("    • {cap}");
             }
             println!();
             println!("  Provider routing:");
@@ -8339,6 +8342,4 @@ fn handle_demo_route(prompt: &str, format: &str) -> Result<()> {
         println!();
         println!("════════════════════════════════════════════════════════════");
     }
-
-    Ok(())
 }

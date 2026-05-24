@@ -1,4 +1,4 @@
-Output demos/opencode-demo.gif
+Output demos/dynamic-routing-demo.gif
 Set FontSize 13
 Set Width 1120
 Set Height 720
