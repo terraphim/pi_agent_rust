@@ -1709,7 +1709,10 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
         ("zai", "https://api.z.ai/api/paas/v4"),
         ("zai-coding-plan", "https://api.z.ai/api/coding/paas/v4"),
         ("zhipuai", "https://open.bigmodel.cn/api/paas/v4"),
-        ("zhipuai-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4"),
+        (
+            "zhipuai-coding-plan",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+        ),
     ] {
         if !models
             .iter()
@@ -1760,9 +1763,18 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
     // MiniMax M2.7 HighSpeed (including coding-plan variants).
     for (provider, base_url) in [
         ("minimax", "https://api.minimax.io/anthropic/v1/messages"),
-        ("minimax-cn", "https://api.minimaxi.com/anthropic/v1/messages"),
-        ("minimax-coding-plan", "https://api.minimax.io/anthropic/v1/messages"),
-        ("minimax-cn-coding-plan", "https://api.minimaxi.com/anthropic/v1/messages"),
+        (
+            "minimax-cn",
+            "https://api.minimaxi.com/anthropic/v1/messages",
+        ),
+        (
+            "minimax-coding-plan",
+            "https://api.minimax.io/anthropic/v1/messages",
+        ),
+        (
+            "minimax-cn-coding-plan",
+            "https://api.minimaxi.com/anthropic/v1/messages",
+        ),
     ] {
         if !models.iter().any(|entry| {
             entry.model.provider == provider && entry.model.id == "minimax-m2.7-highspeed"
@@ -1811,9 +1823,10 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
 
     // Kimi for Coding K2.5 and K2.6.
     for model_id in ["kimi-k2.5", "kimi-k2.6"] {
-        if !models.iter().any(|entry| {
-            entry.model.provider == "kimi-for-coding" && entry.model.id == model_id
-        }) {
+        if !models
+            .iter()
+            .any(|entry| entry.model.provider == "kimi-for-coding" && entry.model.id == model_id)
+        {
             models.push(ModelEntry {
                 model: Model {
                     id: model_id.to_string(),
@@ -2582,31 +2595,44 @@ mod tests {
 
         // GLM-5.1 seeds
         assert!(
-            built.iter().any(|m| m.model.provider == "zai" && m.model.id == "glm-5.1"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "zai" && m.model.id == "glm-5.1"),
             "zai/glm-5.1 should be in built-ins"
         );
         assert!(
-            built.iter().any(|m| m.model.provider == "zai-coding-plan" && m.model.id == "glm-5.1"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "zai-coding-plan" && m.model.id == "glm-5.1"),
             "zai-coding-plan/glm-5.1 should be in built-ins"
         );
 
         // MiniMax M2.7 HighSpeed seeds
         assert!(
-            built.iter().any(|m| m.model.provider == "minimax" && m.model.id == "minimax-m2.7-highspeed"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "minimax" && m.model.id == "minimax-m2.7-highspeed"),
             "minimax/minimax-m2.7-highspeed should be in built-ins"
         );
         assert!(
-            built.iter().any(|m| m.model.provider == "minimax-coding-plan" && m.model.id == "minimax-m2.7-highspeed"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "minimax-coding-plan"
+                    && m.model.id == "minimax-m2.7-highspeed"),
             "minimax-coding-plan/minimax-m2.7-highspeed should be in built-ins"
         );
 
         // Kimi K2.5 / K2.6 seeds
         assert!(
-            built.iter().any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.5"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.5"),
             "kimi-for-coding/kimi-k2.5 should be in built-ins"
         );
         assert!(
-            built.iter().any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.6"),
+            built
+                .iter()
+                .any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.6"),
             "kimi-for-coding/kimi-k2.6 should be in built-ins"
         );
     }

@@ -221,6 +221,9 @@ pub mod vcr;
 #[doc(hidden)]
 pub mod version_check;
 
+#[cfg(feature = "terraphim-routing")]
+pub mod pi_terraphim_router;
+
 pub use error::{Error, Result as PiResult};
 #[doc(hidden)]
 pub use extension_dispatcher::ExtensionDispatcher;
