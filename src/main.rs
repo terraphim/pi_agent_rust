@@ -438,6 +438,64 @@ fn main_impl() -> Result<()> {
                     }
                 }
             }
+            #[cfg(feature = "terraphim-routing")]
+            cli::Commands::DemoRoute { prompt, format } => {
+                use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
+                let capabilities = extract_capabilities(prompt);
+                if capabilities.is_empty() {
+                    eprintln!("No capabilities extracted from prompt: {prompt}");
+                    std::process::exit(1);
+                }
+                let selections: Vec<_> = capabilities
+                    .iter()
+                    .filter_map(|cap| {
+                        get_provider_for_capability(cap).map(|sel| (cap.clone(), sel))
+                    })
+                    .collect();
+                if format.as_str() == "json" {
+                    #[derive(serde::Serialize)]
+                    struct DemoRouteOutput<'a> {
+                        prompt: &'a str,
+                        capabilities: &'a [String],
+                        routes: Vec<DemoRouteSelection<'a>>,
+                    }
+                    #[derive(serde::Serialize)]
+                    struct DemoRouteSelection<'a> {
+                        capability: &'a str,
+                        provider: &'a str,
+                        model: &'a str,
+                        confidence: f32,
+                    }
+                    let output = DemoRouteOutput {
+                        prompt,
+                        capabilities: &capabilities,
+                        routes: selections
+                            .iter()
+                            .map(|(cap, sel)| DemoRouteSelection {
+                                capability: cap,
+                                provider: &sel.provider,
+                                model: &sel.model,
+                                confidence: sel.confidence,
+                            })
+                            .collect(),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("=== Routing Decision ===");
+                    println!("Prompt: {prompt}");
+                    println!("Capabilities: {capabilities:?}");
+                    println!("Routes:");
+                    for (cap, sel) in &selections {
+                        println!("  {cap} -> {provider}/{model} (confidence: {conf:.2})",
+                            cap = cap,
+                            provider = sel.provider,
+                            model = sel.model,
+                            conf = sel.confidence
+                        );
+                    }
+                }
+                return Ok(());
+            }
             _ => {}
         }
     }

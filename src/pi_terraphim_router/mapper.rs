@@ -58,13 +58,11 @@ impl ProviderMapper {
         // Security audit: security-focused tasks
         mappings.insert(
             Capability::SecurityAudit,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.6".to_string(),
-                    confidence: 0.92,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.6".to_string(),
+                confidence: 0.92,
+            }],
         );
 
         // Fast thinking: quick/simple tasks
@@ -104,73 +102,61 @@ impl ProviderMapper {
         // Architecture: system design
         mappings.insert(
             Capability::Architecture,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.6".to_string(),
-                    confidence: 0.93,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.6".to_string(),
+                confidence: 0.93,
+            }],
         );
 
         // Performance: optimization tasks
         mappings.insert(
             Capability::Performance,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.6".to_string(),
-                    confidence: 0.88,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.6".to_string(),
+                confidence: 0.88,
+            }],
         );
 
         // Code review: review tasks
         mappings.insert(
             Capability::CodeReview,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.6".to_string(),
-                    confidence: 0.90,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.6".to_string(),
+                confidence: 0.90,
+            }],
         );
 
         // Refactoring: restructuring tasks
         mappings.insert(
             Capability::Refactoring,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.6".to_string(),
-                    confidence: 0.89,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.6".to_string(),
+                confidence: 0.89,
+            }],
         );
 
         // Documentation: doc generation
         mappings.insert(
             Capability::Documentation,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.5".to_string(),
-                    confidence: 0.87,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.5".to_string(),
+                confidence: 0.87,
+            }],
         );
 
         // Explanation: teaching/clarification
         mappings.insert(
             Capability::Explanation,
-            vec![
-                ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.5".to_string(),
-                    confidence: 0.88,
-                },
-            ],
+            vec![ProviderSelection {
+                provider: "kimi-for-coding".to_string(),
+                model: "kimi-k2.5".to_string(),
+                confidence: 0.88,
+            }],
         );
 
         Self { mappings }
