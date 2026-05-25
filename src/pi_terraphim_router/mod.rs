@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use pi::terraphim_router::{RouterInput, route_and_execute};
+//! use pi::pi_terraphim_router::{RouterInput, route_and_execute};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let input = RouterInput::new("Implement a secure authentication system");
