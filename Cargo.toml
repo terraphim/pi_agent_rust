@@ -249,6 +249,7 @@ image = { version = "0.25", optional = true }
 # Terraphim router integration for intelligent model selection
 terraphim_router = { path = "../terraphim-ai/crates/terraphim_router", optional = true }
 terraphim_types = { path = "../terraphim-ai/crates/terraphim_types", optional = true }
+terraphim_automata = { path = "../terraphim-ai/crates/terraphim_automata", optional = true }
 
 [build-dependencies]
 vergen-gix = { version = "9.1.0", features = ["build", "cargo", "rustc"] }
@@ -338,7 +339,7 @@ loom-tests = []
 # use deterministic clocks.
 manual-timing-tests = []
 jemalloc = ["dep:tikv-jemallocator"]
-terraphim-routing = ["dep:terraphim_router", "dep:terraphim_types"]
+terraphim-routing = ["dep:terraphim_router", "dep:terraphim_types", "dep:terraphim_automata"]
 
 [[test]]
 name = "hostcall_queue_loom"

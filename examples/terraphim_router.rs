@@ -1,32 +1,40 @@
-//! Example: Using the pi-terraphim-router for intelligent model selection.
-//!
-//! Run with: `cargo run --example terraphim_router --features terraphim-routing`.
-
-use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
+use pi::pi_terraphim_router::Router;
 
 fn main() {
-    println!("=== pi-terraphim-router Example ===\n");
+    println!("=== pi-terraphim-router Example (KG Routing) ===\n");
 
-    println!("1. Capability extraction and provider routing:");
+    let router = Router::default_router().expect("failed to load router");
+    println!("Loaded {} routing rules\n", router.rule_count());
+
     let prompts = vec![
-        "Think carefully about this complex algorithm",
-        "Audit this code for security vulnerabilities",
-        "Write tests for the authentication module",
-        "Design a microservices architecture",
+        "implement a secure authentication system",
+        "create a plan for the new architecture",
+        "verify and validate the test results",
+        "build the REST API endpoints",
+        "audit this code for security vulnerabilities",
     ];
 
     for prompt in prompts {
-        let caps = extract_capabilities(prompt);
-        println!("   Prompt: {prompt}");
-        println!("   Capabilities: {caps:?}");
-        for cap in caps {
-            if let Some(selection) = get_provider_for_capability(&cap) {
+        match router.route(prompt) {
+            Some(decision) => {
+                println!("Prompt: {prompt}");
                 println!(
-                    "   Route: {cap} -> {}/{} ({:.2})",
-                    selection.provider, selection.model, selection.confidence
+                    "  Route: {}/{} (concept: {}, priority: {}, confidence: {:.2})",
+                    decision.provider,
+                    decision.model,
+                    decision.matched_concept,
+                    decision.priority,
+                    decision.confidence,
                 );
+                if let Some(action) = decision.render_action(prompt) {
+                    println!("  Action: {action}");
+                }
+                println!();
+            }
+            None => {
+                println!("Prompt: {prompt}");
+                println!("  No route matched\n");
             }
         }
-        println!();
     }
 }

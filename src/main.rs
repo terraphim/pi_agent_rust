@@ -440,60 +440,35 @@ fn main_impl() -> Result<()> {
             }
             #[cfg(feature = "terraphim-routing")]
             cli::Commands::DemoRoute { prompt, format } => {
-                use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
-                let capabilities = extract_capabilities(prompt);
-                if capabilities.is_empty() {
-                    eprintln!("No capabilities extracted from prompt: {prompt}");
-                    std::process::exit(1);
-                }
-                let selections: Vec<_> = capabilities
-                    .iter()
-                    .filter_map(|cap| {
-                        get_provider_for_capability(cap).map(|sel| (cap.clone(), sel))
-                    })
-                    .collect();
-                if format.as_str() == "json" {
-                    #[derive(serde::Serialize)]
-                    struct DemoRouteOutput<'a> {
-                        prompt: &'a str,
-                        capabilities: &'a [String],
-                        routes: Vec<DemoRouteSelection<'a>>,
-                    }
-                    #[derive(serde::Serialize)]
-                    struct DemoRouteSelection<'a> {
-                        capability: &'a str,
-                        provider: &'a str,
-                        model: &'a str,
-                        confidence: f32,
-                    }
-                    let output = DemoRouteOutput {
-                        prompt,
-                        capabilities: &capabilities,
-                        routes: selections
-                            .iter()
-                            .map(|(cap, sel)| DemoRouteSelection {
-                                capability: cap,
-                                provider: &sel.provider,
-                                model: &sel.model,
-                                confidence: sel.confidence,
-                            })
-                            .collect(),
-                    };
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                } else {
-                    println!("=== Routing Decision ===");
-                    println!("Prompt: {prompt}");
-                    println!("Capabilities: {capabilities:?}");
-                    println!("Routes:");
-                    for (cap, sel) in &selections {
+                use pi::pi_terraphim_router;
+                let router = pi_terraphim_router::default_router()?;
+                if let Some(decision) = router.route(prompt) {
+                    if format.as_str() == "json" {
+                        println!("{}", serde_json::to_string_pretty(&decision)?);
+                    } else {
+                        println!("=== Routing Decision ===");
+                        println!("Prompt: {prompt}");
+                        println!("Matched concept: {}", decision.matched_concept);
                         println!(
-                            "  {cap} -> {provider}/{model} (confidence: {conf:.2})",
-                            cap = cap,
-                            provider = sel.provider,
-                            model = sel.model,
-                            conf = sel.confidence
+                            "Primary route: {}/{} (priority: {}, confidence: {:.2})",
+                            decision.provider,
+                            decision.model,
+                            decision.priority,
+                            decision.confidence
                         );
+                        if !decision.fallback_routes.is_empty() {
+                            println!("Fallback routes:");
+                            for route in &decision.fallback_routes {
+                                println!("  {}/{}", route.provider, route.model);
+                            }
+                        }
+                        if let Some(rendered) = decision.render_action(prompt) {
+                            println!("Action: {rendered}");
+                        }
                     }
+                } else {
+                    eprintln!("No route matched for prompt: {prompt}");
+                    std::process::exit(1);
                 }
                 return Ok(());
             }
@@ -8347,58 +8322,45 @@ mod tests {
 #[cfg(feature = "terraphim-routing")]
 #[allow(clippy::items_after_test_module)]
 fn handle_demo_route(prompt: &str, format: &str) {
-    use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
+    use pi::pi_terraphim_router;
 
-    let caps = extract_capabilities(prompt);
-
-    if format == "json" {
-        let mut providers = Vec::new();
-        for cap in &caps {
-            if let Some(sel) = get_provider_for_capability(cap) {
-                providers.push(serde_json::json!({
-                    "capability": cap,
-                    "provider": sel.provider,
-                    "model": sel.model,
-                    "confidence": sel.confidence
-                }));
-            }
+    let router = match pi_terraphim_router::default_router() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to initialise router: {e}");
+            std::process::exit(1);
         }
-        println!(
-            "{}",
-            serde_json::json!({
-                "prompt": prompt,
-                "capabilities": caps,
-                "providers": providers
-            })
-        );
-    } else {
-        println!("╔════════════════════════════════════════════════════════════╗");
-        println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
-        println!("╚════════════════════════════════════════════════════════════╝");
-        println!();
-        println!("Prompt: {prompt}");
-        println!();
+    };
 
-        if caps.is_empty() {
-            println!("  No capabilities detected. Using fallback provider.");
-            println!("  → kimi-for-coding/kimi-k2.6");
+    if let Some(decision) = router.route(prompt) {
+        if format == "json" {
+            println!("{}", serde_json::to_string_pretty(&decision).unwrap());
         } else {
-            println!("  Detected capabilities:");
-            for cap in &caps {
-                println!("    • {cap}");
-            }
+            println!("╔════════════════════════════════════════════════════════════╗");
+            println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
+            println!("╚════════════════════════════════════════════════════════════╝");
             println!();
-            println!("  Provider routing:");
-            for cap in &caps {
-                if let Some(sel) = get_provider_for_capability(cap) {
-                    println!(
-                        "    → {}: {}/{} (confidence: {:.2})",
-                        cap, sel.provider, sel.model, sel.confidence
-                    );
+            println!("Prompt: {prompt}");
+            println!();
+            println!("  Matched concept: {}", decision.matched_concept);
+            println!(
+                "  Primary route: {}/{} (priority: {}, confidence: {:.2})",
+                decision.provider, decision.model, decision.priority, decision.confidence
+            );
+            if !decision.fallback_routes.is_empty() {
+                println!("  Fallback routes:");
+                for route in &decision.fallback_routes {
+                    println!("    {}/{}", route.provider, route.model);
                 }
             }
+            if let Some(rendered) = decision.render_action(prompt) {
+                println!("  Action: {rendered}");
+            }
+            println!();
+            println!("════════════════════════════════════════════════════════════");
         }
-        println!();
-        println!("════════════════════════════════════════════════════════════");
+    } else {
+        eprintln!("No route matched for prompt: {prompt}");
+        std::process::exit(1);
     }
 }
