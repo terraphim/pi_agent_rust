@@ -486,7 +486,8 @@ fn main_impl() -> Result<()> {
                     println!("Capabilities: {capabilities:?}");
                     println!("Routes:");
                     for (cap, sel) in &selections {
-                        println!("  {cap} -> {provider}/{model} (confidence: {conf:.2})",
+                        println!(
+                            "  {cap} -> {provider}/{model} (confidence: {conf:.2})",
                             cap = cap,
                             provider = sel.provider,
                             model = sel.model,
