@@ -111,3 +111,65 @@ pub struct ProviderSelection {
     /// Confidence score (0.0 - 1.0).
     pub confidence: f32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_router_input_new() {
+        let input = RouterInput::new("test prompt");
+        assert_eq!(input.prompt, "test prompt");
+        assert!(input.strategy.is_none());
+        assert!(input.preferred_provider.is_none());
+        assert!(input.preferred_model.is_none());
+        assert!(input.system_prompt.is_none());
+        assert!(input.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_router_input_builder_pattern() {
+        let input = RouterInput::new("test")
+            .with_strategy("latency_optimized")
+            .with_provider("anthropic")
+            .with_model("claude-sonnet-4-6")
+            .with_system_prompt("You are helpful")
+            .with_working_dir(PathBuf::from("/tmp"));
+
+        assert_eq!(input.strategy.as_deref(), Some("latency_optimized"));
+        assert_eq!(input.preferred_provider.as_deref(), Some("anthropic"));
+        assert_eq!(input.preferred_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(input.system_prompt.as_deref(), Some("You are helpful"));
+        assert_eq!(input.working_dir.as_deref(), Some(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn test_provider_selection_fields() {
+        let sel = ProviderSelection {
+            provider: "test-provider".to_string(),
+            model: "test-model".to_string(),
+            confidence: 0.85,
+        };
+        assert_eq!(sel.provider, "test-provider");
+        assert_eq!(sel.model, "test-model");
+        assert!((sel.confidence - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_router_output_serialization() {
+        let output = RouterOutput {
+            response: "hello".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            capabilities: vec!["CodeGeneration".to_string()],
+            confidence: 0.95,
+            reason: "capability match".to_string(),
+            fallback_used: false,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("anthropic"));
+        assert!(json.contains("claude-sonnet-4-6"));
+        assert!(json.contains("CodeGeneration"));
+    }
+}

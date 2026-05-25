@@ -274,4 +274,146 @@ mod tests {
 
         assert!(mapper.get_by_name("UnknownCapability").is_none());
     }
+
+    #[test]
+    fn test_map_security_audit() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::SecurityAudit];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+        assert!((sel.confidence - 0.92).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_map_fast_thinking() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::FastThinking];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.5");
+    }
+
+    #[test]
+    fn test_map_testing() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Testing];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+    }
+
+    #[test]
+    fn test_map_architecture() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Architecture];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+    }
+
+    #[test]
+    fn test_map_performance() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Performance];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+    }
+
+    #[test]
+    fn test_map_code_review() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::CodeReview];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+    }
+
+    #[test]
+    fn test_map_refactoring() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Refactoring];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
+    }
+
+    #[test]
+    fn test_map_documentation() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Documentation];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.5");
+    }
+
+    #[test]
+    fn test_map_explanation() {
+        let mapper = ProviderMapper::new();
+        let caps = vec![Capability::Explanation];
+        let sel = mapper.map(&caps).unwrap();
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.5");
+    }
+
+    #[test]
+    fn test_all_capability_names_resolvable() {
+        let mapper = ProviderMapper::new();
+        let all_names = [
+            "DeepThinking",
+            "FastThinking",
+            "CodeGeneration",
+            "CodeReview",
+            "Architecture",
+            "Testing",
+            "Refactoring",
+            "Documentation",
+            "Explanation",
+            "SecurityAudit",
+            "Performance",
+        ];
+        for name in &all_names {
+            assert!(
+                mapper.get_by_name(name).is_some(),
+                "capability {name} should be resolvable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_confidence_range() {
+        let mapper = ProviderMapper::new();
+        let all_caps = [
+            Capability::DeepThinking,
+            Capability::FastThinking,
+            Capability::CodeGeneration,
+            Capability::CodeReview,
+            Capability::Architecture,
+            Capability::Testing,
+            Capability::Refactoring,
+            Capability::Documentation,
+            Capability::Explanation,
+            Capability::SecurityAudit,
+            Capability::Performance,
+        ];
+        for cap in &all_caps {
+            let sel = mapper.map(&[*cap]).unwrap();
+            assert!(
+                (0.0..=1.0).contains(&sel.confidence),
+                "confidence for {cap:?} should be 0.0-1.0, got {}",
+                sel.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let default = ProviderMapper::default();
+        let explicit = ProviderMapper::new();
+        let sel_default = default.map(&[Capability::CodeGeneration]).unwrap();
+        let sel_explicit = explicit.map(&[Capability::CodeGeneration]).unwrap();
+        assert_eq!(sel_default.provider, sel_explicit.provider);
+        assert_eq!(sel_default.model, sel_explicit.model);
+    }
 }
