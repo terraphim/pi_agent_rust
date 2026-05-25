@@ -1,9 +1,9 @@
-use pi::pi_terraphim_router::Router;
+use pi::pi_terraphim_router;
 
 fn main() {
     println!("=== pi-terraphim-router Example (KG Routing) ===\n");
 
-    let router = Router::default_router().expect("failed to load router");
+    let router = pi_terraphim_router::default_router().expect("failed to load router");
     println!("Loaded {} routing rules\n", router.rule_count());
 
     let prompts = vec![
@@ -15,26 +15,22 @@ fn main() {
     ];
 
     for prompt in prompts {
-        match router.route(prompt) {
-            Some(decision) => {
-                println!("Prompt: {prompt}");
-                println!(
-                    "  Route: {}/{} (concept: {}, priority: {}, confidence: {:.2})",
-                    decision.provider,
-                    decision.model,
-                    decision.matched_concept,
-                    decision.priority,
-                    decision.confidence,
-                );
-                if let Some(action) = decision.render_action(prompt) {
-                    println!("  Action: {action}");
-                }
-                println!();
+        println!("Prompt: {prompt}");
+        if let Some(decision) = router.route(prompt) {
+            println!(
+                "  Route: {}/{} (concept: {}, priority: {}, confidence: {:.2})",
+                decision.provider,
+                decision.model,
+                decision.matched_concept,
+                decision.priority,
+                decision.confidence,
+            );
+            if let Some(action) = decision.render_action(prompt) {
+                println!("  Action: {action}");
             }
-            None => {
-                println!("Prompt: {prompt}");
-                println!("  No route matched\n");
-            }
+        } else {
+            println!("  No route matched");
         }
+        println!();
     }
 }
