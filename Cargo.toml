@@ -247,8 +247,8 @@ wasmtime = { version = "41.0.3", features = ["component-model"], optional = true
 image = { version = "0.25", optional = true }
 
 # Terraphim router integration for intelligent model selection
-terraphim_router = { path = "../terraphim/terraphim-ai/crates/terraphim_router", optional = true }
-terraphim_types = { path = "../terraphim/terraphim-ai/crates/terraphim_types", optional = true }
+terraphim_router = { path = "../terraphim-ai/crates/terraphim_router", optional = true }
+terraphim_types = { path = "../terraphim-ai/crates/terraphim_types", optional = true }
 
 [build-dependencies]
 vergen-gix = { version = "9.1.0", features = ["build", "cargo", "rustc"] }
