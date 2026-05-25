@@ -8322,7 +8322,7 @@ fn handle_demo_route(prompt: &str, format: &str) {
 
         if caps.is_empty() {
             println!("  No capabilities detected. Using fallback provider.");
-            println!("  → openai-codex/gpt-5.5");
+            println!("  → kimi-for-coding/kimi-k2.6");
         } else {
             println!("  Detected capabilities:");
             for cap in &caps {

@@ -26,11 +26,6 @@ impl ProviderMapper {
                     confidence: 0.95,
                 },
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-opus-4-6".to_string(),
-                    confidence: 0.90,
-                },
-                ProviderSelection {
                     provider: "openai-codex".to_string(),
                     model: "gpt-5.5".to_string(),
                     confidence: 0.88,
@@ -43,14 +38,14 @@ impl ProviderMapper {
             Capability::CodeGeneration,
             vec![
                 ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.5".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.6".to_string(),
                     confidence: 0.95,
                 },
                 ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.5".to_string(),
-                    confidence: 0.90,
+                    provider: "openai-codex".to_string(),
+                    model: "gpt-5.5".to_string(),
+                    confidence: 0.93,
                 },
                 ProviderSelection {
                     provider: "zai".to_string(),
@@ -65,14 +60,9 @@ impl ProviderMapper {
             Capability::SecurityAudit,
             vec![
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.6".to_string(),
                     confidence: 0.92,
-                },
-                ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.5".to_string(),
-                    confidence: 0.88,
                 },
             ],
         );
@@ -82,8 +72,8 @@ impl ProviderMapper {
             Capability::FastThinking,
             vec![
                 ProviderSelection {
-                    provider: "google".to_string(),
-                    model: "gemini-3-flash".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.5".to_string(),
                     confidence: 0.92,
                 },
                 ProviderSelection {
@@ -99,14 +89,14 @@ impl ProviderMapper {
             Capability::Testing,
             vec![
                 ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.3-codex-spark".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.6".to_string(),
                     confidence: 0.90,
                 },
                 ProviderSelection {
-                    provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.5".to_string(),
-                    confidence: 0.85,
+                    provider: "openai-codex".to_string(),
+                    model: "gpt-5.3-codex-spark".to_string(),
+                    confidence: 0.88,
                 },
             ],
         );
@@ -116,14 +106,9 @@ impl ProviderMapper {
             Capability::Architecture,
             vec![
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-opus-4-6".to_string(),
-                    confidence: 0.93,
-                },
-                ProviderSelection {
                     provider: "kimi-for-coding".to_string(),
                     model: "kimi-k2.6".to_string(),
-                    confidence: 0.88,
+                    confidence: 0.93,
                 },
             ],
         );
@@ -133,14 +118,9 @@ impl ProviderMapper {
             Capability::Performance,
             vec![
                 ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.5".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.6".to_string(),
                     confidence: 0.88,
-                },
-                ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
-                    confidence: 0.85,
                 },
             ],
         );
@@ -150,14 +130,9 @@ impl ProviderMapper {
             Capability::CodeReview,
             vec![
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.6".to_string(),
                     confidence: 0.90,
-                },
-                ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.4".to_string(),
-                    confidence: 0.87,
                 },
             ],
         );
@@ -167,14 +142,9 @@ impl ProviderMapper {
             Capability::Refactoring,
             vec![
                 ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.5".to_string(),
-                    confidence: 0.89,
-                },
-                ProviderSelection {
                     provider: "kimi-for-coding".to_string(),
-                    model: "kimi-k2.5".to_string(),
-                    confidence: 0.85,
+                    model: "kimi-k2.6".to_string(),
+                    confidence: 0.89,
                 },
             ],
         );
@@ -184,14 +154,9 @@ impl ProviderMapper {
             Capability::Documentation,
             vec![
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
+                    provider: "kimi-for-coding".to_string(),
+                    model: "kimi-k2.5".to_string(),
                     confidence: 0.87,
-                },
-                ProviderSelection {
-                    provider: "openai-codex".to_string(),
-                    model: "gpt-5.4".to_string(),
-                    confidence: 0.84,
                 },
             ],
         );
@@ -201,14 +166,9 @@ impl ProviderMapper {
             Capability::Explanation,
             vec![
                 ProviderSelection {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-6".to_string(),
-                    confidence: 0.88,
-                },
-                ProviderSelection {
                     provider: "kimi-for-coding".to_string(),
                     model: "kimi-k2.5".to_string(),
-                    confidence: 0.84,
+                    confidence: 0.88,
                 },
             ],
         );
@@ -291,8 +251,8 @@ mod tests {
         let selection = mapper.map(&caps);
         assert!(selection.is_some());
         let sel = selection.unwrap();
-        assert_eq!(sel.provider, "openai-codex");
-        assert_eq!(sel.model, "gpt-5.5");
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
     }
 
     #[test]
@@ -301,10 +261,10 @@ mod tests {
         let caps = vec![Capability::CodeGeneration, Capability::SecurityAudit];
         let selection = mapper.map(&caps);
         assert!(selection.is_some());
-        // CodeGeneration has higher confidence (0.95 vs 0.92)
+        // CodeGeneration kimi-for-coding (0.95) vs SecurityAudit anthropic (0.92)
         let sel = selection.unwrap();
-        assert_eq!(sel.provider, "openai-codex");
-        assert_eq!(sel.model, "gpt-5.5");
+        assert_eq!(sel.provider, "kimi-for-coding");
+        assert_eq!(sel.model, "kimi-k2.6");
     }
 
     #[test]
