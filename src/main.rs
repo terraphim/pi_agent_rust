@@ -453,7 +453,7 @@ fn main_impl() -> Result<()> {
                         println!("Prompt: {prompt}");
                         println!("Matched concept: {}", decision.matched_concept);
                         println!(
-                            "Primary route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
+                            "Selected route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
                             decision.provider,
                             decision.model,
                             decision.priority,
@@ -8361,7 +8361,7 @@ fn handle_demo_route(prompt: &str, format: &str) {
             println!();
             println!("  Matched concept: {}", decision.matched_concept);
             println!(
-                "  Primary route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
+                "  Selected route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
                 decision.provider,
                 decision.model,
                 decision.priority,

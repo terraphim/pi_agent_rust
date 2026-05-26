@@ -284,6 +284,70 @@ pub fn check_provider_readiness(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ExecutionSelection {
+    provider: String,
+    model: String,
+    capabilities: Vec<String>,
+    confidence: f64,
+    reason: String,
+    fallback_used: bool,
+}
+
+fn select_execution_route(
+    input: &RouterInput,
+    router: &Router,
+    registry: Option<&crate::models::ModelRegistry>,
+) -> Option<ExecutionSelection> {
+    if let (Some(provider), Some(model)) = (&input.preferred_provider, &input.preferred_model) {
+        return Some(ExecutionSelection {
+            provider: provider.clone(),
+            model: model.clone(),
+            capabilities: vec![],
+            confidence: 1.0,
+            reason: "explicit preference".to_string(),
+            fallback_used: false,
+        });
+    }
+
+    let decision = match registry {
+        Some(reg) => router.route_with_registry(&input.prompt, reg)?,
+        None => router.route(&input.prompt)?,
+    };
+
+    Some(ExecutionSelection {
+        provider: decision.provider.clone(),
+        model: decision.model.clone(),
+        capabilities: vec![decision.matched_concept],
+        confidence: decision.confidence,
+        reason: "kg route match".to_string(),
+        fallback_used: false,
+    })
+}
+
+async fn execute_selection(
+    input: RouterInput,
+    selection: ExecutionSelection,
+) -> RouterResult<RouterOutput> {
+    let mut client = RpcClient::spawn(
+        &selection.provider,
+        &selection.model,
+        input.working_dir.as_deref(),
+    )?;
+    let response = client
+        .send_prompt(&input.prompt, input.system_prompt.as_deref())
+        .await?;
+    Ok(RouterOutput {
+        response,
+        provider: selection.provider,
+        model: selection.model,
+        capabilities: selection.capabilities,
+        confidence: selection.confidence,
+        reason: selection.reason,
+        fallback_used: selection.fallback_used,
+    })
+}
+
 pub async fn route_and_execute(input: RouterInput) -> RouterResult<RouterOutput> {
     if let (Some(provider), Some(model)) = (&input.preferred_provider, &input.preferred_model) {
         let mut client = RpcClient::spawn(provider, model, input.working_dir.as_deref())?;
@@ -341,6 +405,52 @@ pub async fn route_and_execute(input: RouterInput) -> RouterResult<RouterOutput>
             fallback_used: true,
         })
     }
+}
+
+pub async fn route_and_execute_with_registry(
+    input: RouterInput,
+    registry: &crate::models::ModelRegistry,
+) -> RouterResult<RouterOutput> {
+    if let (Some(provider), Some(model)) = (&input.preferred_provider, &input.preferred_model) {
+        let mut client = RpcClient::spawn(provider, model, input.working_dir.as_deref())?;
+        let response = client
+            .send_prompt(&input.prompt, input.system_prompt.as_deref())
+            .await?;
+        return Ok(RouterOutput {
+            response,
+            provider: provider.clone(),
+            model: model.clone(),
+            capabilities: vec![],
+            confidence: 1.0,
+            reason: "explicit preference".to_string(),
+            fallback_used: false,
+        });
+    }
+
+    let router = default_router()?;
+    if let Some(selection) = select_execution_route(&input, &router, Some(registry)) {
+        return execute_selection(input, selection).await;
+    }
+
+    let fallback_provider = "anthropic".to_string();
+    let fallback_model = "claude-sonnet-4-6".to_string();
+    let mut client = RpcClient::spawn(
+        &fallback_provider,
+        &fallback_model,
+        input.working_dir.as_deref(),
+    )?;
+    let response = client
+        .send_prompt(&input.prompt, input.system_prompt.as_deref())
+        .await?;
+    Ok(RouterOutput {
+        response,
+        provider: fallback_provider,
+        model: fallback_model,
+        capabilities: vec![],
+        confidence: 0.0,
+        reason: "fallback: no kg route matched".to_string(),
+        fallback_used: true,
+    })
 }
 
 pub fn extract_capabilities(prompt: &str) -> Vec<String> {
@@ -748,5 +858,75 @@ mod tests {
     fn test_embedded_router_stores_tempdir() {
         let router = default_router().unwrap();
         assert!(router.embedded_tempdir.is_some());
+    }
+
+    #[test]
+    fn test_execution_selection_with_registry_uses_first_ready_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: unknown-provider, unknown-model\nroute:: anthropic, claude-sonnet-4-6\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+        let entry = test_entry("anthropic", "claude-sonnet-4-6", Some("test-key"));
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![entry]);
+
+        let input = RouterInput::new("implement something");
+        let selection = select_execution_route(&input, &router, Some(&registry));
+
+        let sel = selection.expect("selection should be Some");
+        assert_eq!(sel.provider, "anthropic");
+        assert_eq!(sel.model, "claude-sonnet-4-6");
+        assert_eq!(sel.reason, "kg route match");
+        assert!(!sel.fallback_used);
+    }
+
+    #[test]
+    fn test_execution_selection_with_registry_preserves_explicit_preference() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: anthropic, claude-sonnet-4-6\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+        let entry = test_entry("anthropic", "claude-sonnet-4-6", Some("test-key"));
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![entry]);
+
+        let input = RouterInput::new("implement something")
+            .with_provider("openai")
+            .with_model("gpt-4o");
+        let selection = select_execution_route(&input, &router, Some(&registry));
+
+        let sel = selection.expect("selection should be Some");
+        assert_eq!(sel.provider, "openai");
+        assert_eq!(sel.model, "gpt-4o");
+        assert_eq!(sel.reason, "explicit preference");
+        assert!(!sel.fallback_used);
+    }
+
+    #[test]
+    fn test_execution_selection_with_registry_uses_no_match_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: unknown-provider, unknown-model\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![]);
+
+        let input = RouterInput::new("implement something");
+        let selection = select_execution_route(&input, &router, Some(&registry));
+
+        let sel = selection.expect("selection should be Some");
+        assert_eq!(sel.provider, "unknown-provider");
+        assert_eq!(sel.model, "unknown-model");
+        assert_eq!(sel.reason, "kg route match");
+        assert!(!sel.fallback_used);
     }
 }
