@@ -442,7 +442,10 @@ fn main_impl() -> Result<()> {
             cli::Commands::DemoRoute { prompt, format } => {
                 use pi::pi_terraphim_router;
                 let router = pi_terraphim_router::default_router()?;
-                if let Some(decision) = router.route(prompt) {
+                let auth = AuthStorage::load(Config::auth_path())?;
+                let models_path = default_models_path(&Config::global_dir());
+                let registry = ModelRegistry::load(&auth, Some(models_path));
+                if let Some(decision) = router.route_with_registry(prompt, &registry) {
                     if format.as_str() == "json" {
                         println!("{}", serde_json::to_string_pretty(&decision)?);
                     } else {
@@ -450,16 +453,20 @@ fn main_impl() -> Result<()> {
                         println!("Prompt: {prompt}");
                         println!("Matched concept: {}", decision.matched_concept);
                         println!(
-                            "Primary route: {}/{} (priority: {}, confidence: {:.2})",
+                            "Primary route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
                             decision.provider,
                             decision.model,
                             decision.priority,
-                            decision.confidence
+                            decision.confidence,
+                            decision.provider_ready
                         );
                         if !decision.fallback_routes.is_empty() {
                             println!("Fallback routes:");
-                            for route in &decision.fallback_routes {
-                                println!("  {}/{}", route.provider, route.model);
+                            let readiness =
+                                pi_terraphim_router::check_provider_readiness(&decision, &registry);
+                            for (i, route) in decision.fallback_routes.iter().enumerate() {
+                                let ready = readiness.get(i).is_some_and(|r| r.2);
+                                println!("  {}/{} (ready: {})", route.provider, route.model, ready);
                             }
                         }
                         if let Some(rendered) = decision.render_action(prompt) {
@@ -8332,7 +8339,17 @@ fn handle_demo_route(prompt: &str, format: &str) {
         }
     };
 
-    if let Some(decision) = router.route(prompt) {
+    let auth = match AuthStorage::load(Config::auth_path()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Failed to load auth storage: {e}");
+            std::process::exit(1);
+        }
+    };
+    let models_path = default_models_path(&Config::global_dir());
+    let registry = ModelRegistry::load(&auth, Some(models_path));
+
+    if let Some(decision) = router.route_with_registry(prompt, &registry) {
         if format == "json" {
             println!("{}", serde_json::to_string_pretty(&decision).unwrap());
         } else {
@@ -8344,13 +8361,19 @@ fn handle_demo_route(prompt: &str, format: &str) {
             println!();
             println!("  Matched concept: {}", decision.matched_concept);
             println!(
-                "  Primary route: {}/{} (priority: {}, confidence: {:.2})",
-                decision.provider, decision.model, decision.priority, decision.confidence
+                "  Primary route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
+                decision.provider,
+                decision.model,
+                decision.priority,
+                decision.confidence,
+                decision.provider_ready
             );
             if !decision.fallback_routes.is_empty() {
                 println!("  Fallback routes:");
-                for route in &decision.fallback_routes {
-                    println!("    {}/{}", route.provider, route.model);
+                let readiness = pi_terraphim_router::check_provider_readiness(&decision, &registry);
+                for (i, route) in decision.fallback_routes.iter().enumerate() {
+                    let ready = readiness.get(i).is_some_and(|r| r.2);
+                    println!("    {}/{} (ready: {})", route.provider, route.model, ready);
                 }
             }
             if let Some(rendered) = decision.render_action(prompt) {

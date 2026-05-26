@@ -23,6 +23,7 @@ pub struct Router {
     thesaurus: Thesaurus,
     taxonomy_path: PathBuf,
     last_mtime: Option<SystemTime>,
+    embedded_tempdir: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for Router {
@@ -91,10 +92,41 @@ impl Router {
             thesaurus,
             taxonomy_path,
             last_mtime,
+            embedded_tempdir: None,
         })
     }
 
     pub fn route(&self, prompt: &str) -> Option<RouteDecision> {
+        let (rule, score) = self.route_rule(prompt)?;
+        let primary = rule.directives.routes.first()?;
+        Some(Self::decision_from_route(rule, primary, score, false))
+    }
+
+    pub fn route_with_registry(
+        &self,
+        prompt: &str,
+        registry: &crate::models::ModelRegistry,
+    ) -> Option<RouteDecision> {
+        let (rule, score) = self.route_rule(prompt)?;
+        let primary = rule.directives.routes.first()?;
+
+        let selected = rule
+            .directives
+            .routes
+            .iter()
+            .find(|route| Self::route_is_ready(route, registry))
+            .unwrap_or(primary);
+
+        let provider_ready = Self::route_is_ready(selected, registry);
+        Some(Self::decision_from_route(
+            rule,
+            selected,
+            score,
+            provider_ready,
+        ))
+    }
+
+    fn route_rule(&self, prompt: &str) -> Option<(&RoutingRule, f64)> {
         if self.thesaurus.is_empty() {
             return None;
         }
@@ -117,19 +149,34 @@ impl Router {
             }
         }
 
-        let (rule, score) = best?;
-        let primary = rule.directives.routes.first()?;
+        best
+    }
 
-        Some(RouteDecision {
-            provider: primary.provider.clone(),
-            model: primary.model.clone(),
-            action: primary.action.clone(),
+    fn decision_from_route(
+        rule: &RoutingRule,
+        route: &terraphim_types::RouteDirective,
+        score: f64,
+        provider_ready: bool,
+    ) -> RouteDecision {
+        RouteDecision {
+            provider: route.provider.clone(),
+            model: route.model.clone(),
+            action: route.action.clone(),
             confidence: score / 100.0,
             matched_concept: rule.concept.clone(),
             priority: rule.directives.priority.unwrap_or(50),
             fallback_routes: rule.directives.routes.clone(),
-            provider_ready: true,
-        })
+            provider_ready,
+        }
+    }
+
+    fn route_is_ready(
+        route: &terraphim_types::RouteDirective,
+        registry: &crate::models::ModelRegistry,
+    ) -> bool {
+        registry
+            .find(&route.provider, &route.model)
+            .is_some_and(|entry| crate::models::model_entry_is_ready(&entry))
     }
 
     pub fn reload(&mut self) -> RouterResult<()> {
@@ -179,7 +226,9 @@ impl Router {
                 .map_err(|e| RouterError::ParseError(e.to_string()))?;
         }
 
-        Self::load(tmp_dir.keep())
+        let mut router = Self::load(tmp_dir.path())?;
+        router.embedded_tempdir = Some(tmp_dir);
+        Ok(router)
     }
 }
 
@@ -205,6 +254,34 @@ pub fn router_from_config(config: RouterConfig) -> RouterResult<Router> {
             ),
         ))
     }
+}
+
+pub fn get_provider_for_capability(capability: &str) -> Option<ProviderSelection> {
+    let router = default_router().ok()?;
+    let rule = router.rules.iter().find(|r| r.concept == capability)?;
+    let route = rule.directives.routes.first()?;
+
+    Some(ProviderSelection {
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        confidence: f64::from(rule.directives.priority.unwrap_or(50)) / 100.0,
+    })
+}
+
+pub fn check_provider_readiness(
+    decision: &RouteDecision,
+    registry: &crate::models::ModelRegistry,
+) -> Vec<(String, String, bool)> {
+    decision
+        .fallback_routes
+        .iter()
+        .map(|route| {
+            let ready = registry
+                .find(&route.provider, &route.model)
+                .is_some_and(|entry| crate::models::model_entry_is_ready(&entry));
+            (route.provider.clone(), route.model.clone(), ready)
+        })
+        .collect()
 }
 
 pub async fn route_and_execute(input: RouterInput) -> RouterResult<RouterOutput> {
@@ -520,5 +597,156 @@ mod tests {
         };
         let result = router_from_config(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pure_route_has_provider_ready_false() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: anthropic, claude-sonnet-4-6\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+        let decision = router.route("implement something").unwrap();
+        assert!(!decision.provider_ready);
+    }
+
+    fn test_model(provider: &str, id: &str) -> crate::provider::Model {
+        crate::provider::Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: "openai".to_string(),
+            provider: provider.to_string(),
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![crate::provider::InputType::Text],
+            cost: crate::provider::ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 128_000,
+            max_tokens: 16_384,
+            headers: std::collections::HashMap::new(),
+        }
+    }
+
+    fn test_entry(provider: &str, id: &str, api_key: Option<&str>) -> crate::models::ModelEntry {
+        crate::models::ModelEntry {
+            model: test_model(provider, id),
+            api_key: api_key.map(str::to_string),
+            headers: std::collections::HashMap::new(),
+            auth_header: false,
+            compat: None,
+            oauth_config: None,
+        }
+    }
+
+    #[test]
+    fn test_route_with_registry_marks_ready_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: anthropic, claude-sonnet-4-6\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+
+        let entry = test_entry("anthropic", "claude-sonnet-4-6", Some("test-key"));
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![entry]);
+
+        let decision = router
+            .route_with_registry("implement something", &registry)
+            .unwrap();
+        assert!(decision.provider_ready);
+    }
+
+    #[test]
+    fn test_route_with_registry_uses_first_ready_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: unknown-provider, unknown-model\nroute:: anthropic, claude-sonnet-4-6\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+
+        let entry = test_entry("anthropic", "claude-sonnet-4-6", Some("test-key"));
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![entry]);
+
+        let decision = router
+            .route_with_registry("implement something", &registry)
+            .unwrap();
+        assert_eq!(decision.provider, "anthropic");
+        assert_eq!(decision.model, "claude-sonnet-4-6");
+        assert!(decision.provider_ready);
+    }
+
+    #[test]
+    fn test_route_with_registry_falls_back_to_primary_when_none_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: unknown-provider, unknown-model\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![]);
+
+        let decision = router
+            .route_with_registry("implement something", &registry)
+            .unwrap();
+        assert_eq!(decision.provider, "unknown-provider");
+        assert_eq!(decision.model, "unknown-model");
+        assert!(!decision.provider_ready);
+    }
+
+    #[test]
+    fn test_check_provider_readiness_reports_all_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: anthropic, claude-sonnet-4-6\nroute:: kimi, kimi-k2.5\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+
+        let entry = test_entry("anthropic", "claude-sonnet-4-6", Some("test-key"));
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![entry]);
+
+        let decision = router.route("implement something").unwrap();
+        let readiness = check_provider_readiness(&decision, &registry);
+
+        assert_eq!(readiness.len(), 2);
+        assert_eq!(readiness[0].0, "anthropic");
+        assert!(readiness[0].2);
+        assert_eq!(readiness[1].0, "kimi");
+        assert!(!readiness[1].2);
+    }
+
+    #[test]
+    fn test_get_provider_for_capability_returns_taxonomy_concept_route() {
+        let selection = get_provider_for_capability("implementation_tier").unwrap();
+        assert_eq!(selection.provider, "anthropic");
+        assert_eq!(selection.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_get_provider_for_capability_unknown_returns_none() {
+        assert!(get_provider_for_capability("nonexistent_concept").is_none());
+    }
+
+    #[test]
+    fn test_embedded_router_stores_tempdir() {
+        let router = default_router().unwrap();
+        assert!(router.embedded_tempdir.is_some());
     }
 }
