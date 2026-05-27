@@ -348,6 +348,17 @@ async fn execute_selection(
     })
 }
 
+fn no_match_fallback_selection() -> ExecutionSelection {
+    ExecutionSelection {
+        provider: "anthropic".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        capabilities: vec![],
+        confidence: 0.0,
+        reason: "fallback: no kg route matched".to_string(),
+        fallback_used: true,
+    }
+}
+
 pub async fn route_and_execute(input: RouterInput) -> RouterResult<RouterOutput> {
     if let (Some(provider), Some(model)) = (&input.preferred_provider, &input.preferred_model) {
         let mut client = RpcClient::spawn(provider, model, input.working_dir.as_deref())?;
@@ -428,29 +439,9 @@ pub async fn route_and_execute_with_registry(
     }
 
     let router = default_router()?;
-    if let Some(selection) = select_execution_route(&input, &router, Some(registry)) {
-        return execute_selection(input, selection).await;
-    }
-
-    let fallback_provider = "anthropic".to_string();
-    let fallback_model = "claude-sonnet-4-6".to_string();
-    let mut client = RpcClient::spawn(
-        &fallback_provider,
-        &fallback_model,
-        input.working_dir.as_deref(),
-    )?;
-    let response = client
-        .send_prompt(&input.prompt, input.system_prompt.as_deref())
-        .await?;
-    Ok(RouterOutput {
-        response,
-        provider: fallback_provider,
-        model: fallback_model,
-        capabilities: vec![],
-        confidence: 0.0,
-        reason: "fallback: no kg route matched".to_string(),
-        fallback_used: true,
-    })
+    let selection = select_execution_route(&input, &router, Some(registry))
+        .unwrap_or_else(no_match_fallback_selection);
+    execute_selection(input, selection).await
 }
 
 pub fn extract_capabilities(prompt: &str) -> Vec<String> {
@@ -909,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execution_selection_with_registry_uses_no_match_fallback() {
+    fn test_execution_selection_with_registry_uses_matched_route_when_synonym_matches() {
         let dir = tempfile::tempdir().unwrap();
         write_rule(
             dir.path(),
@@ -928,5 +919,37 @@ mod tests {
         assert_eq!(sel.model, "unknown-model");
         assert_eq!(sel.reason, "kg route match");
         assert!(!sel.fallback_used);
+    }
+
+    #[test]
+    fn test_no_match_fallback_selection_uses_default_anthropic_route() {
+        let selection = no_match_fallback_selection();
+        assert_eq!(selection.provider, "anthropic");
+        assert_eq!(selection.model, "claude-sonnet-4-6");
+        assert!(selection.capabilities.is_empty());
+        assert!((selection.confidence - 0.0).abs() < f64::EPSILON);
+        assert_eq!(selection.reason, "fallback: no kg route matched");
+        assert!(selection.fallback_used);
+    }
+
+    #[test]
+    fn test_execution_selection_with_registry_returns_none_without_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rule(
+            dir.path(),
+            "impl",
+            "# Impl\npriority:: 50\nsynonyms:: implement\nroute:: unknown-provider, unknown-model\n",
+        );
+
+        let router = Router::load(dir.path()).unwrap();
+        let registry = crate::models::ModelRegistry::from_entries_for_tests(vec![]);
+
+        let input = RouterInput::new("summarise unrelated notes");
+        let selection = select_execution_route(&input, &router, Some(&registry));
+
+        assert!(
+            selection.is_none(),
+            "non-matching prompt should return None"
+        );
     }
 }
