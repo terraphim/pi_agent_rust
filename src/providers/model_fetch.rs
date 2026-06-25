@@ -88,15 +88,14 @@ fn cache_key(provider: &str) -> String {
 
 fn cache_lookup(key: &str) -> Option<Vec<String>> {
     let guard = cache().lock().ok()?;
-    let entry = guard.get(key)?;
-    if entry.inserted.elapsed() < MODEL_CACHE_TTL {
-        let models = entry.models.clone();
-        drop(guard);
-        Some(models)
-    } else {
-        drop(guard);
-        None
-    }
+    // Extract owned data so the lock guard can be released immediately rather
+    // than held across the return (clippy::significant_drop_tightening).
+    let cached = guard
+        .get(key)
+        .filter(|entry| entry.inserted.elapsed() < MODEL_CACHE_TTL)
+        .map(|entry| entry.models.clone());
+    drop(guard);
+    cached
 }
 
 fn cache_store(key: String, models: Vec<String>) {
@@ -120,8 +119,11 @@ pub fn clear_model_cache() {
     }
 }
 
-/// Fetch the live model catalog for `provider`, returning cached results when
-/// fresh.
+/// Fetch the live model catalog for `provider`, returning cached results when fresh.
+///
+/// On any failure to talk to the provider, fall back to the bundled
+/// static registry and log a warning so operators can see why the dynamic
+/// path degraded.
 ///
 /// `api_key` should be the user's credential for the provider; when empty,
 /// the fetch is skipped immediately and the static registry result is used.

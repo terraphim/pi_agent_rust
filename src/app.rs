@@ -366,16 +366,19 @@ fn load_context_file_from_dir(dir: &Path) -> Option<ContextFile> {
 }
 
 fn format_current_datetime() -> String {
+    // Date only — deliberately no clock time. This string is part of the cached
+    // system-prompt prefix; a per-second timestamp would invalidate the
+    // provider's prompt/KV cache on every request (higher latency + cost). Date
+    // granularity keeps the prefix stable within a day while still giving the
+    // model the current date. (#103)
     let now = Local::now();
-    let date = format!(
+    format!(
         "{}, {} {}, {}",
         now.format("%A"),
         now.format("%B"),
         now.day(),
         now.year()
-    );
-    let time = format!("{} {}", now.format("%I:%M:%S %p"), now.format("%Z"));
-    format!("{date}, {time}")
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -932,6 +935,13 @@ pub fn build_stream_options(
         api_key,
         headers: selection.model_entry.headers.clone(),
         session_id: Some(session.header.id.clone()),
+        // Seed the per-request output cap from the model registry's `maxTokens`
+        // so the value users configure in `models.json` actually takes effect.
+        // Without this every provider falls back to its hardcoded per-request
+        // default (e.g. 4096), truncating turns that emit large tool-call
+        // arguments (most visibly the `write` tool). Embedders can still
+        // override via `set_max_tokens`.
+        max_tokens: Some(selection.model_entry.model.max_tokens),
         ..Default::default()
     };
 

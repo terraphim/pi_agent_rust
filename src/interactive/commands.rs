@@ -37,6 +37,7 @@ pub enum SlashCommand {
     Reload,
     Template,
     Share,
+    Mcp,
 }
 
 impl SlashCommand {
@@ -75,6 +76,7 @@ impl SlashCommand {
             "/reload" => Self::Reload,
             "/template" => Self::Template,
             "/share" => Self::Share,
+            "/mcp" => Self::Mcp,
             _ => return None,
         };
 
@@ -108,6 +110,7 @@ impl SlashCommand {
   /reload            - Reload skills/prompts from disk
   /template <name> [args] - Expand a prompt template by name
   /share             - Upload session HTML to a secret GitHub gist and show URL
+  /mcp               - Show MCP server status (Model Context Protocol)
   /exit, /quit, /q   - Exit Pi
 
   Tips:
@@ -183,11 +186,11 @@ fn provider_has_dedicated_login_flow(provider: &str) -> bool {
 /// the callback server bound on this host. `PI_COPILOT_FORCE_DEVICE_FLOW=1`
 /// opts in unconditionally.
 ///
-/// Note: when `GITHUB_COPILOT_CLIENT_ID` is unset, *both* flows fail with the
-/// same actionable "set GITHUB_COPILOT_CLIENT_ID" error message (the device
-/// flow's error text is slightly better, but neither flow can succeed). We
-/// still route to device flow in that case so the user sees the more explicit
-/// hint, but the only real fix is to set the env var.
+/// When `GITHUB_COPILOT_CLIENT_ID` is unset we fall back to the well-known
+/// public Copilot client id (`crate::auth::DEFAULT_COPILOT_CLIENT_ID`), so both
+/// flows now succeed out of the box (#97). We still prefer the device flow when
+/// no client id is explicitly configured, since that path is the most robust on
+/// headless/SSH sessions where a localhost OAuth redirect can't be reached.
 fn should_use_copilot_device_flow() -> bool {
     if std::env::var("PI_COPILOT_FORCE_DEVICE_FLOW")
         .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
@@ -994,6 +997,10 @@ impl PiApp {
         let stream_options = agent_guard.stream_options_mut();
         stream_options.api_key.clone_from(&resolved_key_opt);
         stream_options.headers.clone_from(&next.headers);
+        // Pick up the new model's configured output cap so an interactive
+        // model switch honors its registry `maxTokens` instead of carrying
+        // over the previous model's limit.
+        stream_options.max_tokens = Some(next.model.max_tokens);
         stream_options.thinking_level = Some(next_thinking);
 
         session_guard.header.provider = Some(next.model.provider.clone());
@@ -1115,6 +1122,10 @@ impl PiApp {
             let stream_options = agent_guard.stream_options_mut();
             stream_options.api_key.clone_from(&resolved_key_opt);
             stream_options.headers.clone_from(&target_entry.headers);
+            // Pick up the new model's configured output cap so an interactive
+            // model switch honors its registry `maxTokens` instead of carrying
+            // over the previous model's limit.
+            stream_options.max_tokens = Some(target_entry.model.max_tokens);
         }
         agent_guard.stream_options_mut().thinking_level = Some(thinking_sync.effective);
         drop(agent_guard);
@@ -1228,7 +1239,7 @@ impl PiApp {
                         .await
                     } else if provider == "github-copilot" || provider == "copilot" {
                         let client_id =
-                            std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+                            crate::auth::resolved_copilot_client_id();
                         let copilot_config = crate::auth::CopilotOAuthConfig {
                             client_id,
                             ..crate::auth::CopilotOAuthConfig::default()
@@ -1278,7 +1289,7 @@ impl PiApp {
                             Box::pin(crate::auth::poll_kimi_code_device_flow(&dc)).await
                         } else if provider == "github-copilot" || provider == "copilot" {
                             let client_id =
-                                std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+                                crate::auth::resolved_copilot_client_id();
                             let copilot_config = crate::auth::CopilotOAuthConfig {
                                 client_id,
                                 ..crate::auth::CopilotOAuthConfig::default()
@@ -2225,6 +2236,7 @@ impl PiApp {
             SlashCommand::Reload => self.handle_slash_reload(),
             SlashCommand::Template => self.handle_slash_template(args),
             SlashCommand::Share => self.handle_slash_share(args),
+            SlashCommand::Mcp => self.handle_slash_mcp(args),
         }
     }
 
@@ -2305,7 +2317,7 @@ impl PiApp {
             let provider_clone = provider;
             let runtime_handle = self.runtime_handle.clone();
             let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request);
-            let client_id = std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+            let client_id = crate::auth::resolved_copilot_client_id();
             let copilot_config = crate::auth::CopilotOAuthConfig {
                 client_id,
                 ..crate::auth::CopilotOAuthConfig::default()
@@ -2374,7 +2386,7 @@ impl PiApp {
         } else if provider == "google-antigravity" {
             crate::auth::start_google_antigravity_oauth().map(|info| (info, None))
         } else if provider == "github-copilot" || provider == "copilot" {
-            let client_id = std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+            let client_id = crate::auth::resolved_copilot_client_id();
             let copilot_config = crate::auth::CopilotOAuthConfig {
                 client_id,
                 ..crate::auth::CopilotOAuthConfig::default()
@@ -2905,6 +2917,64 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
         });
 
         self.status_message = Some("Reloading resources...".to_string());
+        None
+    }
+
+    /// Show MCP (Model Context Protocol) server status.
+    ///
+    /// Pi connects to MCP servers only when an installed extension registers
+    /// them via `registerMcpServer`. It does *not* read standalone MCP config
+    /// files such as `.agents/mcp.json`, `.pi/mcp.json`, or
+    /// `~/.pi/agent/mcp.json` (those are honored by other agents, not Pi), so
+    /// this command makes the current state explicit instead of leaving
+    /// `/mcp` as an "unknown command" (pi_agent_rust#112).
+    pub(super) fn handle_slash_mcp(&mut self, _args: &str) -> Option<Cmd> {
+        let servers = self
+            .extensions
+            .as_ref()
+            .map(crate::extensions::ExtensionManager::extension_mcp_servers)
+            .unwrap_or_default();
+
+        let mut content = String::from("MCP servers (Model Context Protocol)\n");
+        if servers.is_empty() {
+            content.push_str("\n  No MCP servers are currently registered.\n");
+        } else {
+            let _ = writeln!(content, "\n  {} registered:", servers.len());
+            for server in &servers {
+                let name = server
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unnamed>");
+                let target = server
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        server
+                            .get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "<no url/command>".to_string());
+                let _ = writeln!(content, "    • {name} — {target}");
+            }
+        }
+
+        content.push_str(
+            "\nNote: Pi only loads MCP servers that an installed extension registers via\n\
+             registerMcpServer. It does not read standalone MCP config files\n\
+             (.agents/mcp.json, .pi/mcp.json, ~/.pi/agent/mcp.json) — those are used by\n\
+             other agents, not Pi. To expose an MCP server to Pi, install an extension\n\
+             that registers it.",
+        );
+
+        self.messages.push(ConversationMessage {
+            role: MessageRole::System,
+            content,
+            thinking: None,
+            collapsed: false,
+        });
+        self.scroll_to_last_match("MCP servers");
         None
     }
 
