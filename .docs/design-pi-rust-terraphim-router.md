@@ -1,123 +1,141 @@
-# Implementation Plan: pi-rust-terraphim-router Skill
+# Implementation Plan: pi_terraphim_router Dynamic Routing Module
 
-**Status**: Draft
-**Research Doc**: `.docs/research-pi-rust-terraphim-router.md`
-**Author**: AI Agent
-**Date**: 2026-05-24
-**Estimated Effort**: 2-3 days
+**Status**: Draft  
+**Research Doc**: `.docs/research-pi-rust-terraphim-router-v2.md`  
+**Author**: AI Agent  
+**Date**: 2026-05-25  
+**Estimated Effort**: 6-8 hours  
 
 ## Overview
 
 ### Summary
-Build a Claude Code/Opencode skill that uses Terraphim's keyword-based capability extraction to intelligently route prompts to the optimal pi-rust provider and model. The skill spawns pi-rust in RPC mode, sends the routed prompt, and returns structured JSON output with the LLM response and routing metadata.
+Implement the missing `src/pi_terraphim_router.rs` module behind the existing `terraphim-routing` feature flag. The module provides KG-driven prompt routing using markdown-defined taxonomy rules with Aho-Corasick synonym matching. Wire up the already-declared `demo-route` CLI subcommand to output routing decisions as JSON or text.
 
 ### Approach
-**Subprocess RPC approach** (chosen from research):
-- Terraphim `KeywordRouter` extracts capabilities from the prompt
-- Static capability-to-provider mapping selects optimal provider/model
-- pi-rust is spawned as `--mode rpc` subprocess
-- JSON-RPC 2.0 protocol sends prompt and receives streaming response
-- Structured JSON output returned to calling agent
+Replicate the proven `KgRouter` pattern from `terraphim_orchestrator` using only `terraphim_automata` and `terraphim_types` as dependencies (minimal footprint, no SQLite, no orchestrator bloat). Load `.md` taxonomy files from a user-configurable directory, build an in-memory `Thesaurus`, match prompts via Aho-Corasick, and return structured routing decisions with provider health checking.
 
 ### Scope
 
 **In Scope:**
-- Keyword-based capability extraction from prompts
-- Capability-to-provider/model mapping for 11 capabilities
-- pi-rust RPC subprocess spawning and communication
-- Structured JSON output with response + routing metadata
-- Fallback chain when routing fails
-- Configuration via environment variables
+- `src/pi_terraphim_router.rs` module (new file)
+- `terraphim_automata` + `terraphim_types` dependency wiring in `Cargo.toml`
+- `demo-route` CLI handler in `src/main.rs`
+- Default taxonomy directory at `~/.config/pi/routing_taxonomy/`
+- Embedded fallback taxonomy (3-tier ADF rules baked into binary)
+- JSON and text output formats for `demo-route`
+- Provider readiness checking via `model_entry_is_ready()`
+- Hot-reload support (`reload_if_changed()`)
 
 **Out of Scope:**
-- In-process SDK integration (runtime mismatch)
-- terraphim knowledge graph search
-- Real-time provider health monitoring
-- Custom keyword mapping UI
-- ACP/Zed editor integration
+- Persistence / SQLite backend
+- Online learning / adaptive routing
+- Multi-hop graph traversal beyond synonym matching
+- Web UI for editing taxonomy rules
+- Real-time provider health monitoring daemon
 
 **Avoid At All Cost** (from 5/25 analysis):
-- In-process integration with asupersync/tokio runtime bridging (too complex, fragile)
-- HTTP daemon/service (deployment overhead, YAGNI)
-- terraphim-cli pipe approach (too slow for interactive use)
-- Dynamic provider discovery (over-engineering; static mapping is sufficient)
+- Adding `terraphim_orchestrator` as a dependency (pulls in scheduler, dispatcher, cost tracker -- massive bloat)
+- Adding `terraphim_persistence` / SQLite (not needed; in-memory only)
+- Async runtime boundaries between asupersync and tokio (keep routing synchronous)
 
 ## Architecture
 
 ### Component Diagram
 ```
-+-------------------------------------------------+
-|  Claude Code / Opencode Agent                   |
-|  (calls skill via tool invocation)              |
-+-------------------------------------------------+
-                          |
-                          v
-+-------------------------------------------------+
-|  pi-rust-terraphim-router Skill                 |
-|                                                 |
-|  +---------------------+  +------------------+  |
-|  | KeywordExtractor    |->| ProviderMapper   |  |
-|  | (terraphim_router)  |  | (static mapping) |  |
-|  +---------------------+  +------------------+  |
-|             |                      |            |
-|             v                      v            |
-|  +---------------------+  +------------------+  |
-|  | FallbackChain       |->| RpcClient        |  |
-|  | (default models)    |  | (pi --mode rpc)  |  |
-|  +---------------------+  +------------------+  |
-|                                    |            |
-+------------------------------------|------------+
-                                     |
-                                     v
-+-------------------------------------------------+
-|  pi-rust (subprocess)                           |
-|  --mode rpc --provider X --model Y              |
-+-------------------------------------------------+
-                                     |
-                                     v
-+-------------------------------------------------+
-|  LLM API (Anthropic/OpenAI/etc.)                |
-+-------------------------------------------------+
++------------------+        +-----------------------+
+|   CLI (main.rs)  |        |  pi_terraphim_router  |
+| Commands::DemoRoute| ----> |                       |
++------------------+        |  +-----------------+  |
+                            |  | TaxonomyLoader  |  |
+                            |  | (markdown .md)  |  |
+                            |  +--------+--------+  |
+                            |           |           |
+                            |  +--------v--------+  |
+                            |  | ThesaurusBuilder|  |
+                            |  | (Aho-Corasick)  |  |
+                            |  +--------+--------+  |
+                            |           |           |
+                            |  +--------v--------+  |
+                            |  | KgRouter        |  |
+                            |  | (find_matches)  |  |
+                            |  +--------+--------+  |
+                            |           |           |
+                            |  +--------v--------+  |
+                            |  | HealthFilter    |  |
+                            |  | (model_entry_   |  |
+                            |  |  is_ready)      |  |
+                            |  +--------+--------+  |
+                            |           |           |
+                            |  +--------v--------+  |
+                            |  | RouteDecision   |  |
+                            |  | (JSON / text)   |  |
+                            |  +-----------------+  |
+                            +-----------------------+
 ```
 
 ### Data Flow
 ```
-Prompt -> KeywordExtractor.extract_capabilities() -> Vec<Capability>
-  -> ProviderMapper.map_to_provider() -> ProviderSelection
-    -> RpcClient.spawn_and_send() -> JsonRpcRequest
-      -> pi-rust --mode rpc -> LLM API
-        -> Streaming Response -> JsonRpcResponse
-          -> Skill.format_output() -> Structured JSON
+User: pi demo-route "implement auth system" --format json
+    |
+    v
+CLI parses prompt + format
+    |
+    v
+Lazy-load taxonomy (first call):
+  - Try ~/.config/pi/routing_taxonomy/
+  - Fallback to embedded default rules
+    |
+    v
+Build Thesaurus from synonyms in all .md files
+    |
+    v
+terraphim_automata::find_matches(prompt, thesaurus)
+    |
+    v
+Group matches by concept, select highest priority
+    |
+    v
+Check provider readiness (model_entry_is_ready)
+    |
+    v
+Select first healthy route from fallback chain
+    |
+    v
+Render action template (substitute {{ model }}, {{ prompt }})
+    |
+    v
+Output JSON or text
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale | Alternatives Rejected |
 |----------|-----------|----------------------|
-| Subprocess RPC instead of SDK | Avoids asupersync/tokio runtime mismatch; simpler; stable protocol | In-process SDK (runtime mismatch, complex) |
-| Static capability mapping | Sufficient for 11 capabilities; no runtime config needed | Dynamic provider discovery (over-engineering) |
-| JSON output format | Agents consume structured data; enables downstream routing decisions | Raw text (loses metadata) |
-| Feature flag gating | Keeps pi-rust binary size under control; optional integration | Always-on (forces dependency on all users) |
-| terraphim_router crate directly | Minimal dependencies; no CLI overhead | terraphim-cli subprocess (extra process, slower) |
+| Use `terraphim_automata` + `terraphim_types` only | Minimal deps; `find_matches` and `parse_markdown_directives_dir` provide everything needed | `terraphim_orchestrator` (too heavy), `terraphim_router` (too limited) |
+| Synchronous routing API | Avoids async runtime mismatch between asupersync and tokio | Async wrapper (unnecessary complexity for <10ms operation) |
+| Lazy taxonomy loading | Keeps startup time <100ms; load on first route request | Eager loading (adds latency to every startup, even when routing unused) |
+| Embedded fallback taxonomy | Works out-of-box without user configuration; user taxonomy overrides | Require user to create taxonomy directory first (friction) |
+| In-memory only (no persistence) | Zero SQLite dependency; hot-reload via mtime check | SQLite cache (complexity not justified for small taxonomy) |
 
 ### Eliminated Options (Essentialism)
 
 | Option Rejected | Why Rejected | Risk of Including |
 |-----------------|--------------|-------------------|
-| In-process SDK integration | asupersync/tokio runtime mismatch; mutex incompatibility; complex error bridging | Fragile integration, hard to debug |
-| terraphim-cli pipe approach | Extra process spawn; higher latency; fragile parsing | >100ms routing latency |
-| HTTP service daemon | Deployment complexity; port management; not needed for local agent use | Operational overhead, YAGNI |
-| Dynamic provider health monitoring | Over-engineering; static mapping covers current needs | Complexity without proportional value |
-| Custom keyword mapping at runtime | YAGNI; default mappings cover 11 capabilities well | Scope creep, UI complexity |
+| terraphim_orchestrator dependency | Would add ~50+ transitive deps, scheduler, dispatcher, cost tracker | Binary size increase >5MB, compile time increase, maintenance burden |
+| terraphim_router::KnowledgeGraphRouter | Lacks render_action(), first_healthy_route(), hot-reload; would need to wrap/extend anyway | Incomplete solution; users would hit missing features quickly |
+| SQLite-backed taxonomy cache | Not needed; markdown files are the source of truth; mtime check is sufficient | Adds rusqlite, opendal deps; prior false assumption blocked this feature |
+| Async routing API | find_matches is sync; adding async buys nothing for <10ms operation | Runtime complexity, tokio/asupersync boundary issues |
+| HTTP service wrapper | Over-engineering; CLI subprocess approach is sufficient | Deployment complexity, daemon lifecycle management |
 
 ### Simplicity Check
 
 > "Minimum code that solves the problem. Nothing speculative."
 
 **What if this could be easy?**
-The simplest design is: extract keywords -> lookup provider in a HashMap -> spawn pi-rust with that provider -> return JSON. This is exactly what we're building. No daemon, no in-process integration, no dynamic discovery.
 
-**Senior Engineer Test**: A senior engineer would call this appropriately simple for the problem. It uses subprocess RPC (proven pattern), static mapping (sufficient for known capabilities), and returns JSON (standard for agent tools).
+The simplest design is: load markdown files, build a `Thesaurus`, call `find_matches`, pick highest priority, check provider readiness, output result. No database, no async, no daemon, no learning. This is exactly what `KgRouter` does in ~310 lines.
+
+**Senior Engineer Test**: A senior engineer would recognise this as a straightforward text matching problem. The design uses standard Terraphim primitives (`Thesaurus`, `find_matches`) with a thin routing layer on top. No over-engineering.
 
 **Nothing Speculative Checklist**:
 - [x] No features the user didn't request
@@ -129,112 +147,117 @@ The simplest design is: extract keywords -> lookup provider in a HashMap -> spaw
 ## File Changes
 
 ### New Files
-
 | File | Purpose |
 |------|---------|
-| `crates/pi_rust_terraphim_router/src/lib.rs` | Module root and public API |
-| `crates/pi_rust_terraphim_router/src/extractor.rs` | Keyword-based capability extraction wrapper |
-| `crates/pi_rust_terraphim_router/src/mapper.rs` | Capability-to-provider mapping |
-| `crates/pi_rust_terraphim_router/src/rpc_client.rs` | pi-rust RPC subprocess client |
-| `crates/pi_rust_terraphim_router/src/types.rs` | Input/output types for skill |
-| `crates/pi_rust_terraphim_router/src/error.rs` | Error types |
-| `crates/pi_rust_terraphim_router/Cargo.toml` | Crate manifest with terraphim deps |
-| `skills/pi-rust-terraphim-router/SKILL.md` | Claude Code/Opencode skill definition |
-| `skills/pi-rust-terraphim-router/config.json` | Default provider mapping configuration |
+| `src/pi_terraphim_router.rs` | Core routing module: taxonomy loading, Aho-Corasick matching, route selection |
 
 ### Modified Files
-
 | File | Changes |
 |------|---------|
-| `Cargo.toml` (workspace) | Add `crates/pi_rust_terraphim_router` to workspace members |
-| `Cargo.toml` (pi_agent_rust) | Add optional `terraphim-routing` feature flag |
+| `Cargo.toml` | Add `terraphim_automata` to `terraphim-routing` feature dependencies |
+| `src/lib.rs` | No changes (module already declared at line 224) |
+| `src/main.rs` | Add `Commands::DemoRoute` handler in the ultra-fast path match block |
 
 ### Deleted Files
-None.
+| File | Reason |
+|------|--------|
+| None | |
 
 ## API Design
 
 ### Public Types
 
 ```rust
-/// Input to the router skill
-#[derive(Debug, Clone)]
-pub struct RouterInput {
-    /// User prompt
-    pub prompt: String,
-    /// Optional strategy override (cost_optimized, latency_optimized, capability_first)
-    pub strategy: Option<String>,
-    /// Optional preferred provider (bypasses routing)
-    pub preferred_provider: Option<String>,
-    /// Optional preferred model (bypasses routing)
-    pub preferred_model: Option<String>,
-    /// Optional system prompt
-    pub system_prompt: Option<String>,
-    /// Working directory for pi-rust
-    pub working_dir: Option<PathBuf>,
-}
-
-/// Output from the router skill
-#[derive(Debug, Clone, Serialize)]
-pub struct RouterOutput {
-    /// LLM response text
-    pub response: String,
-    /// Selected provider
+/// A routing decision from KG matching.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RouteDecision {
+    /// Provider name (e.g., "anthropic", "kimi")
     pub provider: String,
-    /// Selected model
+    /// Model identifier (e.g., "claude-sonnet-4-6", "kimi-for-coding/k2p5")
     pub model: String,
-    /// Capabilities extracted from prompt
-    pub capabilities: Vec<String>,
-    /// Routing confidence (0.0 - 1.0)
-    pub confidence: f32,
-    /// Routing reason
-    pub reason: String,
-    /// Whether fallback was used
-    pub fallback_used: bool,
-    /// Token usage (if available)
-    pub token_usage: Option<TokenUsage>,
+    /// CLI action template with placeholders
+    pub action: Option<String>,
+    /// Match confidence (0.0-1.0)
+    pub confidence: f64,
+    /// Concept that matched (filename stem)
+    pub matched_concept: String,
+    /// Priority from the matched rule (0-100)
+    pub priority: u8,
+    /// All routes from the matched file (primary + fallbacks)
+    pub fallback_routes: Vec<terraphim_types::RouteDirective>,
+    /// Whether the selected provider has credentials configured
+    pub provider_ready: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TokenUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
+impl RouteDecision {
+    /// Render the action template by substituting `{{ model }}` and `{{ prompt }}`.
+    pub fn render_action(&self, prompt: &str) -> Option<String>;
+}
+
+/// KG-based model router that loads routing rules from markdown files.
+pub struct Router {
+    /* internal fields */
+}
+
+impl Router {
+    /// Load routing rules from a taxonomy directory.
+    pub fn load(taxonomy_path: impl Into<PathBuf>) -> Result<Self, RouterError>;
+    
+    /// Route a prompt to the best provider+model.
+    pub fn route(&self, prompt: &str) -> Option<RouteDecision>;
+    
+    /// Reload rules from the taxonomy directory.
+    pub fn reload(&mut self) -> Result<(), RouterError>;
+    
+    /// Reload rules only if any file has been modified.
+    pub fn reload_if_changed(&mut self) -> bool;
+    
+    /// Number of loaded routing rules.
+    pub fn rule_count(&self) -> usize;
+}
+
+/// Router configuration and defaults.
+pub struct RouterConfig {
+    /// Path to taxonomy directory (default: ~/.config/pi/routing_taxonomy)
+    pub taxonomy_path: Option<PathBuf>,
+    /// Whether to use embedded fallback rules if no taxonomy exists
+    pub use_embedded_fallback: bool,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self;
+}
+
+/// Errors that can occur during router operations.
+#[derive(Debug, thiserror::Error)]
+pub enum RouterError {
+    #[error("taxonomy directory not found: {0}")]
+    TaxonomyNotFound(String),
+    #[error("failed to parse taxonomy: {0}")]
+    ParseError(String),
 }
 ```
 
 ### Public Functions
 
 ```rust
-/// Route a prompt to the optimal pi-rust provider and return the LLM response.
-///
-/// # Arguments
-/// * `input` - Router input with prompt and optional overrides
-///
-/// # Returns
-/// Structured output with LLM response and routing metadata
-///
-/// # Errors
-/// Returns `RouterError::NoProviderFound` if no provider matches capabilities
-/// Returns `RouterError::RpcError` if pi-rust subprocess fails
-pub async fn route_and_execute(input: RouterInput) -> Result<RouterOutput, RouterError>;
+/// Create a router with default configuration.
+/// Loads from ~/.config/pi/routing_taxonomy/ if it exists,
+/// otherwise uses embedded fallback taxonomy.
+pub fn default_router() -> Result<Router, RouterError>;
 
-/// Extract capabilities from a prompt without executing.
-///
-/// # Arguments
-/// * `prompt` - User prompt text
-///
-/// # Returns
-/// List of extracted capabilities
-pub fn extract_capabilities(prompt: &str) -> Vec<String>;
+/// Create a router from explicit configuration.
+pub fn router_from_config(config: RouterConfig) -> Result<Router, RouterError>;
 
-/// Get the provider mapping for a given capability.
-///
-/// # Arguments
-/// * `capability` - Capability name (e.g., "DeepThinking")
-///
-/// # Returns
-/// Provider selection with provider name, model, and confidence
-pub fn get_provider_for_capability(capability: &str) -> Option<ProviderSelection>;
+/// Extract capabilities from a prompt without routing.
+/// Returns the list of matched concept names.
+pub fn extract_capabilities(prompt: &str, router: &Router) -> Vec<String>;
+
+/// Get the provider readiness status for all routes in a decision.
+pub fn check_provider_readiness(
+    decision: &RouteDecision,
+    model_registry: &pi::models::ModelRegistry,
+) -> Vec<(String, String, bool)>;
 ```
 
 ### Error Types
@@ -242,279 +265,238 @@ pub fn get_provider_for_capability(capability: &str) -> Option<ProviderSelection
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
-    #[error("no provider found for capabilities: {0:?}")]
-    NoProviderFound(Vec<String>),
-
-    #[error("provider not ready (missing credentials): {provider}/{model}")]
-    ProviderNotReady { provider: String, model: String },
-
-    #[error("RPC communication failed: {0}")]
-    RpcError(String),
-
-    #[error("pi-rust subprocess failed: {0}")]
-    SubprocessError(String),
-
-    #[error("invalid capability: {0}")]
-    InvalidCapability(String),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[error("taxonomy directory not found: {0}")]
+    TaxonomyNotFound(String),
+    #[error("failed to parse taxonomy: {0}")]
+    ParseError(String),
 }
 ```
 
 ## Test Strategy
 
 ### Unit Tests
-
 | Test | Location | Purpose |
 |------|----------|---------|
-| `test_extract_deep_thinking` | `extractor.rs` | Verify DeepThinking keyword detection |
-| `test_extract_code_generation` | `extractor.rs` | Verify CodeGeneration keyword detection |
-| `test_extract_security_audit` | `extractor.rs` | Verify SecurityAudit keyword detection |
-| `test_extract_multiple_capabilities` | `extractor.rs` | Verify multiple capability extraction |
-| `test_map_deep_thinking_to_provider` | `mapper.rs` | Verify capability-to-provider mapping |
-| `test_map_code_generation_to_provider` | `mapper.rs` | Verify CodeGeneration mapping |
-| `test_fallback_when_no_match` | `mapper.rs` | Verify fallback chain |
-| `test_rpc_client_spawn` | `rpc_client.rs` | Verify subprocess spawning |
-| `test_rpc_client_send_receive` | `rpc_client.rs` | Verify JSON-RPC communication |
-| `test_format_output` | `types.rs` | Verify JSON output structure |
+| `test_load_taxonomy` | `pi_terraphim_router.rs` | Verify markdown files are loaded correctly |
+| `test_route_by_synonym` | `pi_terraphim_router.rs` | Verify Aho-Corasick matching works |
+| `test_priority_selection` | `pi_terraphim_router.rs` | Higher priority wins when multiple rules match |
+| `test_no_match_returns_none` | `pi_terraphim_router.rs` | Unknown prompts return None gracefully |
+| `test_render_action` | `pi_terraphim_router.rs` | Template substitution works correctly |
+| `test_reload_picks_up_changes` | `pi_terraphim_router.rs` | Hot-reload detects file modifications |
+| `test_fallback_routes` | `pi_terraphim_router.rs` | Multiple routes are preserved in decision |
+| `test_embedded_fallback` | `pi_terraphim_router.rs` | Default router works without user taxonomy |
 
 ### Integration Tests
-
 | Test | Location | Purpose |
 |------|----------|---------|
-| `test_route_and_execute_real_provider` | `tests/integration.rs` | Full flow with real pi-rust (requires API key) |
-| `test_route_and_execute_mock_provider` | `tests/integration.rs` | Full flow with mock RPC |
-| `test_end_to_end_with_fallback` | `tests/integration.rs` | Fallback chain verification |
+| `test_demo_route_cli_json` | `tests/` or inline in main.rs | CLI outputs valid JSON |
+| `test_demo_route_cli_text` | `tests/` or inline in main.rs | CLI outputs readable text |
+| `test_provider_readiness_integration` | `tests/` | Routing respects credential availability |
 
-### Property Tests
-
-```rust
-proptest! {
-    #[test]
-    fn extract_capabilities_never_panics(prompt in "\\PC{0,500}") {
-        let _ = extract_capabilities(&prompt);
+### Conformance Tests
+Add a new conformance fixture for routing:
+```json
+{
+  "version": "1.0",
+  "tool": "terraphim_router",
+  "cases": [
+    {
+      "name": "route_implementation_task",
+      "input": {"prompt": "implement authentication module"},
+      "expected": {
+        "content_contains": ["implementation_tier", "anthropic"],
+        "content_regex": "confidence.*0\.[0-9]+"
+      }
     }
-
-    #[test]
-    fn route_output_has_required_fields(output in router_output_strategy()) {
-        prop_assert!(!output.response.is_empty());
-        prop_assert!(!output.provider.is_empty());
-        prop_assert!(!output.model.is_empty());
-    }
+  ]
 }
 ```
 
 ## Implementation Steps
 
-### Step 1: Create Crate Skeleton
-**Files:** `crates/pi_rust_terraphim_router/Cargo.toml`, `src/lib.rs`, `src/error.rs`
-**Description:** Create new crate with dependencies, module structure, and error types
-**Tests:** Verify crate compiles
-**Dependencies:** None
-**Estimated:** 1 hour
+### Step 1: Add Dependency
+**Files:** `Cargo.toml`
+**Description:** Add `terraphim_automata` to the `terraphim-routing` feature
+**Tests:** `cargo check --features terraphim-routing` compiles
+**Estimated:** 15 minutes
 
 ```toml
-[package]
-name = "pi_rust_terraphim_router"
-version = "0.1.0"
-edition = "2024"
+# In [dependencies] section:
+terraphim_automata = { path = "../terraphim-ai/crates/terraphim_automata", optional = true }
 
-[dependencies]
-terraphim_router = { path = "../../../terraphim-ai/crates/terraphim_router" }
-terraphim_types = { path = "../../../terraphim-ai/crates/terraphim_types" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-tokio = { version = "1", features = ["process", "io-util", "macros"] }
-tracing = "0.1"
-
-[dev-dependencies]
-tokio-test = "0.4"
-proptest = "1.0"
+# In [features] section:
+terraphim-routing = ["dep:terraphim_router", "dep:terraphim_types", "dep:terraphim_automata"]
 ```
 
-### Step 2: Implement Capability Extraction
-**Files:** `src/extractor.rs`
-**Description:** Wrap terraphim_router's KeywordRouter to extract capabilities from prompts
-**Tests:** Unit tests for all 11 capabilities
-**Dependencies:** Step 1
-**Estimated:** 2 hours
+### Step 2: Core Types and Errors
+**Files:** `src/pi_terraphim_router.rs` (first half)
+**Description:** Define `RouteDecision`, `RouterConfig`, `RouterError`
+**Tests:** Unit tests for type construction and error formatting
+**Estimated:** 45 minutes
 
 ```rust
-use terraphim_router::keyword::KeywordRouter;
-use terraphim_types::capability::Capability;
+// Key code to write
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RouteDecision { ... }
 
-pub struct CapabilityExtractor {
-    router: KeywordRouter,
-}
-
-impl CapabilityExtractor {
-    pub fn new() -> Self {
-        Self { router: KeywordRouter::new() }
-    }
-
-    pub fn extract(&self, prompt: &str) -> Vec<Capability> {
-        self.router.extract_capabilities(prompt)
-    }
-}
+#[derive(Debug, thiserror::Error)]
+pub enum RouterError { ... }
 ```
 
-### Step 3: Implement Provider Mapping
-**Files:** `src/mapper.rs`
-**Description:** Map extracted capabilities to pi-rust provider/model combinations with fallback chain
-**Tests:** Unit tests for mapping and fallback
+### Step 3: Taxonomy Loading
+**Files:** `src/pi_terraphim_router.rs`
+**Description:** Implement `Router::load()` using `terraphim_automata::markdown_directives::parse_markdown_directives_dir`
+**Tests:** Unit tests for loading from temp directory, handling missing directory, parsing warnings
 **Dependencies:** Step 2
-**Estimated:** 3 hours
+**Estimated:** 1 hour
 
 ```rust
-use std::collections::HashMap;
-use terraphim_types::capability::Capability;
-
-#[derive(Debug, Clone)]
-pub struct ProviderSelection {
-    pub provider: String,
-    pub model: String,
-    pub confidence: f32,
-}
-
-pub struct ProviderMapper {
-    mappings: HashMap<Capability, Vec<ProviderSelection>>,
-}
-
-impl ProviderMapper {
-    pub fn new() -> Self {
-        let mut mappings = HashMap::new();
-        mappings.insert(Capability::DeepThinking, vec![
-            ProviderSelection { provider: "kimi-for-coding".into(), model: "kimi-k2.6".into(), confidence: 0.95 },
-            ProviderSelection { provider: "anthropic".into(), model: "claude-opus-4-6".into(), confidence: 0.90 },
-            ProviderSelection { provider: "openai-codex".into(), model: "gpt-5.5".into(), confidence: 0.88 },
-        ]);
-        mappings.insert(Capability::CodeGeneration, vec![
-            ProviderSelection { provider: "openai-codex".into(), model: "gpt-5.5".into(), confidence: 0.95 },
-            ProviderSelection { provider: "kimi-for-coding".into(), model: "kimi-k2.5".into(), confidence: 0.90 },
-            ProviderSelection { provider: "zai".into(), model: "glm-5.1".into(), confidence: 0.85 },
-        ]);
-        // ... other capabilities
-        Self { mappings }
-    }
-
-    pub fn map(&self, capabilities: &[Capability]) -> Option<ProviderSelection> {
-        // Select highest confidence provider across all capabilities
-        capabilities.iter()
-            .filter_map(|cap| self.mappings.get(cap))
-            .flat_map(|selections| selections.iter().cloned())
-            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+// Key code to write
+impl Router {
+    pub fn load(taxonomy_path: impl Into<PathBuf>) -> Result<Self, RouterError> {
+        let parse_result = terraphim_automata::parse_markdown_directives_dir(&path)
+            .map_err(|e| RouterError::ParseError(e.to_string()))?;
+        // Build thesaurus from synonyms...
     }
 }
 ```
 
-### Step 4: Implement RPC Client
-**Files:** `src/rpc_client.rs`
-**Description:** Spawn pi-rust in RPC mode and communicate via JSON-RPC 2.0
-**Tests:** Integration tests with mock and real pi-rust
-**Dependencies:** Step 1
-**Estimated:** 4 hours
+### Step 4: Routing Logic
+**Files:** `src/pi_terraphim_router.rs`
+**Description:** Implement `Router::route()` with Aho-Corasick matching and priority selection
+**Tests:** Unit tests for synonym matching, priority tiebreaking, no-match fallback
+**Dependencies:** Step 3
+**Estimated:** 1.5 hours
 
 ```rust
-use tokio::process::{Command, Child};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
-
-pub struct RpcClient {
-    child: Child,
-}
-
-impl RpcClient {
-    pub async fn spawn(provider: &str, model: &str) -> Result<Self, RouterError> {
-        let child = Command::new("pi")
-            .args(["--mode", "rpc", "--provider", provider, "--model", model])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        Ok(Self { child })
-    }
-
-    pub async fn send_prompt(&mut self, prompt: &str) -> Result<String, RouterError> {
-        // Send JSON-RPC request
-        // Read streaming response
-        // Return accumulated text
-        todo!()
-    }
+// Key code to write
+pub fn route(&self, prompt: &str) -> Option<RouteDecision> {
+    let matches = terraphim_automata::find_matches(prompt, self.thesaurus.clone(), false).ok()?;
+    // Group by concept, select highest priority...
 }
 ```
 
-### Step 5: Implement Main Router
-**Files:** `src/lib.rs` (update)
-**Description:** Wire extractor, mapper, and RPC client into `route_and_execute()`
-**Tests:** Integration tests
-**Dependencies:** Steps 2, 3, 4
-**Estimated:** 3 hours
+### Step 5: Embedded Fallback Taxonomy
+**Files:** `src/pi_terraphim_router.rs`
+**Description:** Include default 3-tier ADF rules as compile-time strings; build router from embedded data when user taxonomy missing
+**Tests:** Unit test verifying `default_router()` works without filesystem access
+**Dependencies:** Step 3
+**Estimated:** 1 hour
 
-### Step 6: Create Skill Definition
-**Files:** `skills/pi-rust-terraphim-router/SKILL.md`, `skills/pi-rust-terraphim-router/config.json`
-**Description:** Claude Code/Opencode skill definition with usage examples
-**Tests:** Manual verification
-**Dependencies:** Step 5
-**Estimated:** 2 hours
+```rust
+// Key code to write
+const EMBEDDED_TAXONOMY: &[(&str, &str)] = &[
+    ("planning_tier.md", include_str!("../resources/routing_taxonomy/planning_tier.md")),
+    // ...
+];
+```
 
-### Step 7: Documentation
-**Files:** `README.md`, inline docs
-**Description:** User-facing documentation with setup instructions and examples
-**Tests:** Doc tests
-**Dependencies:** Step 6
-**Estimated:** 2 hours
+### Step 6: CLI Handler
+**Files:** `src/main.rs`
+**Description:** Add `Commands::DemoRoute` handler in the ultra-fast path match block (around line 299)
+**Tests:** Unit tests in `cli.rs` already exist for parsing; add integration test for output
+**Dependencies:** Steps 2-5
+**Estimated:** 45 minutes
+
+```rust
+// In main.rs match block:
+cli::Commands::DemoRoute { prompt, format } => {
+    let router = pi::pi_terraphim_router::default_router()?;
+    match router.route(&prompt) {
+        Some(decision) => {
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&decision)?),
+                _ => println!("{}", format_route_decision(&decision)),
+            }
+        }
+        None => {
+            eprintln!("No route matched for prompt: {}", prompt);
+            std::process::exit(1);
+        }
+    }
+    return Ok(());
+}
+```
+
+### Step 7: Provider Readiness Integration
+**Files:** `src/pi_terraphim_router.rs`
+**Description:** Add `check_provider_readiness()` function that filters routes by `model_entry_is_ready()`
+**Tests:** Unit tests with mock model registry
+**Dependencies:** Step 4
+**Estimated:** 30 minutes
+
+### Step 8: Hot Reload
+**Files:** `src/pi_terraphim_router.rs`
+**Description:** Implement `reload_if_changed()` using directory mtime
+**Tests:** Unit test: modify file, verify reload detects change
+**Dependencies:** Step 3
+**Estimated:** 30 minutes
+
+### Step 9: Documentation and Example Update
+**Files:** `examples/terraphim_router.rs`, inline docs
+**Description:** Update example to use actual API; add module-level documentation
+**Tests:** `cargo run --example terraphim_router --features terraphim-routing`
+**Dependencies:** Steps 2-8
+**Estimated:** 30 minutes
+
+### Step 10: Quality Gates
+**Files:** All changed files
+**Description:** Run compiler checks, tests, UBS scanner
+**Tests:** `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --features terraphim-routing`, `ubs --staged --only=rust .`
+**Dependencies:** All previous steps
+**Estimated:** 30 minutes
 
 ## Rollback Plan
 
 If issues discovered:
-1. Remove `crates/pi_rust_terraphim_router` from workspace
-2. Remove `terraphim-routing` feature flag from pi_agent_rust
-3. Delete skill directory `skills/pi-rust-terraphim-router/`
-4. Revert any Cargo.toml changes
+1. Disable feature: remove `terraphim-routing` from default features (already not in default)
+2. Remove module declaration from `src/lib.rs:224`
+3. Remove CLI handler from `src/main.rs`
 
-Feature flag: `terraphim-routing` (disabled by default)
+Feature is already behind `terraphim-routing` flag -- zero impact when disabled.
 
 ## Dependencies
 
 ### New Dependencies
-
 | Crate | Version | Justification |
 |-------|---------|---------------|
-| `terraphim_router` | 0.1.x | Core keyword extraction and routing logic |
-| `terraphim_types` | 0.1.x | Capability and Provider types |
-| `tokio` | 1.x | Async subprocess management (already in terraphim) |
-| `serde_json` | 1.x | JSON-RPC protocol handling |
+| `terraphim_automata` | 1.x | Aho-Corasick matching (`find_matches`) + markdown directives parsing |
+
+Already declared (no change needed):
+| Crate | Version | Justification |
+|-------|---------|---------------|
+| `terraphim_types` | 1.x | `Thesaurus`, `NormalizedTerm`, `RouteDirective` |
+| `terraphim_router` | 1.x | Already in Cargo.toml (optional) -- may remove if unused |
 
 ### Dependency Updates
-None.
+| Crate | From | To | Reason |
+|-------|------|-----|--------|
+| None | | | |
+
+### Dependency Removal Consideration
+`terraphim_router` is currently in `Cargo.toml` but the new design uses `terraphim_automata` + `terraphim_types` directly. Consider removing `terraphim_router` from the feature to reduce compile-time overhead, unless `KnowledgeGraphRouter` is needed for future expansion.
 
 ## Performance Considerations
 
 ### Expected Performance
-
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| Capability extraction | <5ms | Benchmark with 500-char prompts |
-| Provider mapping | <1ms | Benchmark with 3 capabilities |
-| pi-rust spawn overhead | <50ms | Measure subprocess spawn time |
-| Total routing latency | <100ms | End-to-end from prompt to LLM request |
+| Routing latency | <10ms | `cargo bench` or simple timing in tests |
+| Taxonomy load time | <50ms | Timing in `Router::load()` |
+| Memory overhead | <1MB | `sizeof` analysis or heap profiling |
+| Binary size overhead | <500KB | `cargo bloat --features terraphim-routing` |
 
 ### Benchmarks to Add
-
 ```rust
 #[bench]
-fn bench_extract_capabilities(b: &mut Bencher) {
-    let extractor = CapabilityExtractor::new();
-    let prompt = "Implement a secure authentication system with JWT tokens";
-    b.iter(|| extractor.extract(prompt));
+fn bench_route_prompt(b: &mut Bencher) {
+    let router = Router::load("test_taxonomy").unwrap();
+    b.iter(|| router.route("implement authentication"));
 }
 
 #[bench]
-fn bench_provider_mapping(b: &mut Bencher) {
-    let mapper = ProviderMapper::new();
-    let caps = vec![Capability::CodeGeneration, Capability::SecurityAudit];
-    b.iter(|| mapper.map(&caps));
+fn bench_load_taxonomy(b: &mut Bencher) {
+    b.iter(|| Router::load("test_taxonomy"));
 }
 ```
 
@@ -522,10 +504,10 @@ fn bench_provider_mapping(b: &mut Bencher) {
 
 | Item | Status | Owner |
 |------|--------|-------|
-| Verify terraphim_router compiles standalone | Pending | Agent |
-| Measure actual pi-rust RPC spawn latency | Pending | Agent |
-| Validate capability-to-provider mapping accuracy | Pending | Agent |
-| Test on bigbox (Linux x86-64) | Pending | Agent |
+| Verify terraphim_automata compiles in pi-rust workspace | Pending | Implementer |
+| Decide whether to keep terraphim_router dependency | Pending | Implementer |
+| Create default taxonomy markdown files in resources/ | Pending | Implementer |
+| Write conformance fixture for routing | Pending | Implementer |
 
 ## Approval
 
@@ -533,3 +515,59 @@ fn bench_provider_mapping(b: &mut Bencher) {
 - [ ] Test strategy approved
 - [ ] Performance targets agreed
 - [ ] Human approval received
+
+---
+
+## Appendix: Reference Implementation Mapping
+
+This table maps `terraphim_orchestrator::KgRouter` API to the planned `pi_terraphim_router::Router` API:
+
+| KgRouter (reference) | pi_terraphim_router (this plan) | Notes |
+|---------------------|----------------------------------|-------|
+| `KgRouter::load(path)` | `Router::load(path)` | Identical |
+| `KgRouter::route_agent(task)` | `Router::route(prompt)` | Renamed for generality |
+| `KgRouteDecision` | `RouteDecision` | Same fields, added `provider_ready` |
+| `KgRouteDecision::render_action()` | `RouteDecision::render_action()` | Identical |
+| `KgRouteDecision::first_healthy_route()` | `check_provider_readiness()` | Extracted to free function for testability |
+| `KgRouter::reload()` | `Router::reload()` | Identical |
+| `KgRouter::reload_if_changed()` | `Router::reload_if_changed()` | Identical |
+| `KgRouter::rule_count()` | `Router::rule_count()` | Identical |
+| `KgRouterError` | `RouterError` | Same variants |
+| `KgRouter::all_routes()` | `Router::all_routes()` | For probing/testing |
+
+## Appendix: Embedded Fallback Taxonomy
+
+If user taxonomy directory does not exist, the router will use embedded rules equivalent to:
+
+**planning_tier.md:**
+```markdown
+# Planning Tier
+priority:: 80
+synonyms:: strategic planning, architecture design, create a plan
+synonyms:: product vision, technical strategy, feasibility study
+route:: anthropic, claude-opus-4-6
+route:: kimi, kimi-for-coding/k2p6
+route:: openai, openai/gpt-5.4
+```
+
+**implementation_tier.md:**
+```markdown
+# Implementation Tier
+priority:: 50
+synonyms:: implement, build, code, fix, test, security audit
+synonyms:: bug fix, patch, enhancement, cargo build
+route:: anthropic, claude-sonnet-4-6
+route:: kimi, kimi-for-coding/k2p5
+route:: openai, openai/gpt-5.3-codex
+```
+
+**review_tier.md:**
+```markdown
+# Review Tier
+priority:: 40
+synonyms:: verify, validate, check results, compliance check
+synonyms:: review plan, quality gate, drift detection
+route:: anthropic, claude-haiku-4-6
+route:: kimi, kimi-for-coding/k2p5
+route:: openai, openai/gpt-5.4-mini
+```

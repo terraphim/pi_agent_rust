@@ -438,6 +438,47 @@ fn main_impl() -> Result<()> {
                     }
                 }
             }
+            #[cfg(feature = "terraphim-routing")]
+            cli::Commands::DemoRoute { prompt, format } => {
+                use pi::pi_terraphim_router;
+                let router = pi_terraphim_router::default_router()?;
+                let auth = AuthStorage::load(Config::auth_path())?;
+                let models_path = default_models_path(&Config::global_dir());
+                let registry = ModelRegistry::load(&auth, Some(models_path));
+                if let Some(decision) = router.route_with_registry(prompt, &registry) {
+                    if format.as_str() == "json" {
+                        println!("{}", serde_json::to_string_pretty(&decision)?);
+                    } else {
+                        println!("=== Routing Decision ===");
+                        println!("Prompt: {prompt}");
+                        println!("Matched concept: {}", decision.matched_concept);
+                        println!(
+                            "Selected route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
+                            decision.provider,
+                            decision.model,
+                            decision.priority,
+                            decision.confidence,
+                            decision.provider_ready
+                        );
+                        if !decision.fallback_routes.is_empty() {
+                            println!("Fallback routes:");
+                            let readiness =
+                                pi_terraphim_router::check_provider_readiness(&decision, &registry);
+                            for (i, route) in decision.fallback_routes.iter().enumerate() {
+                                let ready = readiness.get(i).is_some_and(|r| r.2);
+                                println!("  {}/{} (ready: {})", route.provider, route.model, ready);
+                            }
+                        }
+                        if let Some(rendered) = decision.render_action(prompt) {
+                            println!("Action: {rendered}");
+                        }
+                    }
+                } else {
+                    eprintln!("No route matched for prompt: {prompt}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             _ => {}
         }
     }
@@ -8309,58 +8350,61 @@ mod tests {
 #[cfg(feature = "terraphim-routing")]
 #[allow(clippy::items_after_test_module)]
 fn handle_demo_route(prompt: &str, format: &str) {
-    use pi::pi_terraphim_router::{extract_capabilities, get_provider_for_capability};
+    use pi::pi_terraphim_router;
 
-    let caps = extract_capabilities(prompt);
-
-    if format == "json" {
-        let mut providers = Vec::new();
-        for cap in &caps {
-            if let Some(sel) = get_provider_for_capability(cap) {
-                providers.push(serde_json::json!({
-                    "capability": cap,
-                    "provider": sel.provider,
-                    "model": sel.model,
-                    "confidence": sel.confidence
-                }));
-            }
+    let router = match pi_terraphim_router::default_router() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to initialise router: {e}");
+            std::process::exit(1);
         }
-        println!(
-            "{}",
-            serde_json::json!({
-                "prompt": prompt,
-                "capabilities": caps,
-                "providers": providers
-            })
-        );
-    } else {
-        println!("╔════════════════════════════════════════════════════════════╗");
-        println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
-        println!("╚════════════════════════════════════════════════════════════╝");
-        println!();
-        println!("Prompt: {prompt}");
-        println!();
+    };
 
-        if caps.is_empty() {
-            println!("  No capabilities detected. Using fallback provider.");
-            println!("  → openai-codex/gpt-5.5");
+    let auth = match AuthStorage::load(Config::auth_path()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Failed to load auth storage: {e}");
+            std::process::exit(1);
+        }
+    };
+    let models_path = default_models_path(&Config::global_dir());
+    let registry = ModelRegistry::load(&auth, Some(models_path));
+
+    if let Some(decision) = router.route_with_registry(prompt, &registry) {
+        if format == "json" {
+            println!("{}", serde_json::to_string_pretty(&decision).unwrap());
         } else {
-            println!("  Detected capabilities:");
-            for cap in &caps {
-                println!("    • {cap}");
-            }
+            println!("╔════════════════════════════════════════════════════════════╗");
+            println!("║  pi-rust terraphim-router: Intelligent Model Selection    ║");
+            println!("╚════════════════════════════════════════════════════════════╝");
             println!();
-            println!("  Provider routing:");
-            for cap in &caps {
-                if let Some(sel) = get_provider_for_capability(cap) {
-                    println!(
-                        "    → {}: {}/{} (confidence: {:.2})",
-                        cap, sel.provider, sel.model, sel.confidence
-                    );
+            println!("Prompt: {prompt}");
+            println!();
+            println!("  Matched concept: {}", decision.matched_concept);
+            println!(
+                "  Selected route: {}/{} (priority: {}, confidence: {:.2}, ready: {})",
+                decision.provider,
+                decision.model,
+                decision.priority,
+                decision.confidence,
+                decision.provider_ready
+            );
+            if !decision.fallback_routes.is_empty() {
+                println!("  Fallback routes:");
+                let readiness = pi_terraphim_router::check_provider_readiness(&decision, &registry);
+                for (i, route) in decision.fallback_routes.iter().enumerate() {
+                    let ready = readiness.get(i).is_some_and(|r| r.2);
+                    println!("    {}/{} (ready: {})", route.provider, route.model, ready);
                 }
             }
+            if let Some(rendered) = decision.render_action(prompt) {
+                println!("  Action: {rendered}");
+            }
+            println!();
+            println!("════════════════════════════════════════════════════════════");
         }
-        println!();
-        println!("════════════════════════════════════════════════════════════");
+    } else {
+        eprintln!("No route matched for prompt: {prompt}");
+        std::process::exit(1);
     }
 }
