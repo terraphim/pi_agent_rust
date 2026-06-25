@@ -1533,14 +1533,17 @@ mod tests {
     fn provider_default_model_id_resolves_coding_plan_and_corrected_defaults() {
         assert_eq!(
             provider_default_model_id("zai-coding-plan"),
-            Some("glm-4.7")
+            Some("glm-5.1")
         );
-        assert_eq!(provider_default_model_id("zai"), Some("glm-4.7"));
+        assert_eq!(provider_default_model_id("zai"), Some("glm-5.1"));
         assert_eq!(
             provider_default_model_id("minimax-coding-plan"),
-            Some("MiniMax-M2.7")
+            Some("minimax-m2.7-highspeed")
         );
-        assert_eq!(provider_default_model_id("minimax"), Some("MiniMax-M2.7"));
+        assert_eq!(
+            provider_default_model_id("minimax"),
+            Some("minimax-m2.7-highspeed")
+        );
         // The Kimi for Coding plan uses a stable virtual model id.
         assert_eq!(
             provider_default_model_id("kimi-for-coding"),
