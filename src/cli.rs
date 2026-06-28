@@ -306,6 +306,20 @@ pub struct Cli {
     #[arg(long)]
     pub models: Option<String>,
 
+    /// HTTP request timeout in seconds for provider API calls.
+    ///
+    /// Bounds connect + request + first-response-header latency for each
+    /// provider request. `0` disables the timeout entirely (unbounded).
+    ///
+    /// When unset, the default is provider-aware: 60s for cloud providers and
+    /// 600s (10 minutes) for local providers (Ollama, LM Studio) where the
+    /// first request can block while the model loads into memory. Raise this if
+    /// a local model's cold start exceeds the default. Equivalent to the
+    /// `PI_HTTP_REQUEST_TIMEOUT_SECS` env var and the `requestTimeoutSecs`
+    /// setting. See pi_agent_rust#90.
+    #[arg(long, value_name = "SECONDS", env = "PI_HTTP_REQUEST_TIMEOUT_SECS")]
+    pub request_timeout: Option<u64>,
+
     // === Thinking/Reasoning ===
     /// Extended thinking level
     #[arg(long, value_parser = ["off", "minimal", "low", "medium", "high", "xhigh"])]
@@ -498,6 +512,18 @@ pub struct Cli {
     /// List all supported providers with aliases and auth env keys
     #[arg(long)]
     pub list_providers: bool,
+
+    /// Fetch the live model catalog from a provider's `/v1/models` endpoint
+    /// (OpenAI-compatible providers only). Falls back to the static registry
+    /// when the live call fails. Results are cached in-memory for 5 minutes;
+    /// set `PI_DISABLE_MODEL_CACHE=1` to bypass.
+    #[arg(long, value_name = "PROVIDER")]
+    pub fetch_models: Option<String>,
+
+    /// When used with `--fetch-models`, ignore any cached entry and force a
+    /// fresh network call (still falls back to the static registry on error).
+    #[arg(long, requires = "fetch_models")]
+    pub refresh_models: bool,
 
     // === Subcommands ===
     #[command(subcommand)]

@@ -265,7 +265,9 @@ Each mock/stub usage outside Suite 1 must be explicitly allowlisted here with ra
 | `MockHostActions` | `src/extensions.rs` (unit tests) | 2 | In-module stub for `sendMessage`/`sendUserMessage`. | bd-m9rk | Replace with real session-based dispatch once full integration test exists. |
 
 **Process for adding new exceptions:** Open a bead with rationale. Get review. Add to this table
-with the bead ID. Update the CI allowlist regex in `.github/workflows/ci.yml`.
+with the bead ID. Add the `<path>:<Identifier>` entry to `.no-mock-allowlist` at repo root (the
+no-mock CI gate in `.github/workflows/ci.yml` reads that file; new entries are not allowed
+without a corresponding allowlist line).
 
 ### Ratified Non-Mock Standard (bd-1f42.1.3)
 

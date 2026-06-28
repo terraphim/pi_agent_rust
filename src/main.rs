@@ -572,7 +572,6 @@ fn main_impl() -> Result<()> {
     let reactor = create_reactor()?;
     let runtime = RuntimeBuilder::multi_thread()
         .blocking_threads(1, 2)
-        .enable_parking(false)
         .with_reactor(reactor)
         .build()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1031,8 +1030,23 @@ async fn run(
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+    // Resolve the HTTP request timeout before any provider HTTP client is
+    // constructed so the client's single resolution path sees it. The
+    // `--request-timeout` flag is bound to the PI_HTTP_REQUEST_TIMEOUT_SECS env
+    // var via clap, so `cli.request_timeout` already reflects either the flag
+    // or that env var. Config-file values are applied later (lower precedence)
+    // once config is loaded. See pi_agent_rust#90.
+    if let Some(secs) = cli.request_timeout {
+        pi::http::client::set_request_timeout_override(secs);
+    }
+
     if let Some(command) = cli.command.take() {
         handle_subcommand(command, &cwd).await?;
+        return Ok(());
+    }
+
+    if let Some(provider) = cli.fetch_models.take() {
+        handle_fetch_models(&provider, cli.refresh_models).await?;
         return Ok(());
     }
 
@@ -1052,6 +1066,14 @@ async fn run(
         // CLI flag (and PI_NO_MOUSE_CAPTURE env var, which clap reads via #[arg(env)])
         // takes precedence over the persisted setting. Workaround for #78.
         config.disable_mouse_capture = Some(true);
+    }
+    // Apply the persisted request-timeout setting at the lowest precedence:
+    // only when neither the CLI flag nor the env var has already supplied one
+    // (`cli.request_timeout` reflects both). See pi_agent_rust#90.
+    if cli.request_timeout.is_none() {
+        if let Some(secs) = config.request_timeout_secs {
+            pi::http::client::set_request_timeout_override(secs);
+        }
     }
 
     let startup_mode = cli.mode.clone().unwrap_or_else(|| {
@@ -1266,8 +1288,10 @@ async fn run(
         let acp_options = pi::acp::AcpOptions {
             config: config.clone(),
             available_models,
+            model_registry: model_registry.clone(),
             auth: auth.clone(),
             runtime_handle: runtime_handle.clone(),
+            session_dir: cli.session_dir.as_ref().map(PathBuf::from),
         };
         return run_acp_mode(acp_options).await;
     }
@@ -1676,7 +1700,9 @@ async fn run(
                 thinking_level: sm.thinking_level,
             })
             .collect::<Vec<_>>();
-        run_rpc_mode(
+        // Boxed: this future is large (clippy::large_futures); boxing keeps the
+        // enclosing future small.
+        Box::pin(run_rpc_mode(
             agent_session,
             resources,
             config.clone(),
@@ -1685,7 +1711,7 @@ async fn run(
             cli.api_key.clone(),
             auth.clone(),
             runtime_handle.clone(),
-        )
+        ))
         .await
     } else if is_interactive {
         let model_scope = selection
@@ -5558,6 +5584,64 @@ fn save_list_models_cache(models_path: &Path, payload: &ListModelsCachePayload) 
     } else {
         let _ = fs::remove_file(&temp_path);
     }
+}
+
+async fn handle_fetch_models(provider: &str, refresh: bool) -> Result<()> {
+    // Resolve the API key: prefer the user's auth.json credential for the
+    // provider, then fall back to environment variables advertised in the
+    // canonical metadata.  An empty key triggers the static-registry path
+    // inside `fetch_provider_models` itself.
+    let api_key = resolve_provider_api_key(provider);
+
+    let models = if refresh {
+        pi::providers::refresh_provider_models(provider, &api_key).await
+    } else {
+        pi::providers::fetch_provider_models(provider, &api_key).await
+    };
+
+    let models = match models {
+        Ok(models) => models,
+        Err(err) => {
+            // `fetch_provider_models` only returns Err for inputs that can
+            // never produce a useful list (unknown provider, etc.); surface
+            // those clearly rather than dumping the empty static fallback.
+            eprintln!("Failed to list models for {provider:?}: {err}");
+            return Err(anyhow::anyhow!(err.to_string()));
+        }
+    };
+
+    if models.is_empty() {
+        eprintln!(
+            "No models available for {provider:?} (static registry is empty and live fetch failed). \
+             Run with RUST_LOG=warn for fallback diagnostics."
+        );
+    } else {
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        for id in &models {
+            let _ = writeln!(out, "{id}");
+        }
+        let _ = out.flush();
+    }
+    Ok(())
+}
+
+fn resolve_provider_api_key(provider: &str) -> String {
+    if let Ok(auth) = AuthStorage::load(Config::auth_path()) {
+        if let Some(key) = auth.api_key(provider) {
+            if !key.trim().is_empty() {
+                return key;
+            }
+        }
+    }
+    for env_key in provider_metadata::provider_auth_env_keys(provider) {
+        if let Ok(value) = std::env::var(env_key) {
+            if !value.trim().is_empty() {
+                return value;
+            }
+        }
+    }
+    String::new()
 }
 
 fn list_providers() {

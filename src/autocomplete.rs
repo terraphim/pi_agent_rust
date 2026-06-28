@@ -693,6 +693,9 @@ struct BuiltinSlashCommand {
     description: &'static str,
 }
 
+// A flat static data table of built-in slash commands; not splittable into a
+// cohesive helper, so allow the line count rather than fragment the table.
+#[allow(clippy::too_many_lines)]
 const fn builtin_slash_commands() -> &'static [BuiltinSlashCommand] {
     &[
         BuiltinSlashCommand {
@@ -790,6 +793,10 @@ const fn builtin_slash_commands() -> &'static [BuiltinSlashCommand] {
         BuiltinSlashCommand {
             name: "share",
             description: "Export to a temp HTML file and show path",
+        },
+        BuiltinSlashCommand {
+            name: "mcp",
+            description: "Show MCP server status (Model Context Protocol)",
         },
     ]
 }

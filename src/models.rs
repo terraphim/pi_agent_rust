@@ -37,7 +37,70 @@ impl ModelEntry {
                 | "gpt-5.2-codex"
                 | "gpt-5.3-codex"
                 | "gpt-5.3-codex-spark"
-        )
+        ) || self.is_deepseek_reasoning_model()
+            || self.is_anthropic_xhigh_effort_model()
+    }
+
+    /// Whether this is an Anthropic adaptive-thinking model whose modern
+    /// `output_config.effort` accepts the `xhigh` tier.
+    ///
+    /// xhigh effort is supported on Claude Opus 4.7/4.8 and the Claude
+    /// Fable/Mythos (5.x) families; Opus 4.6 and Sonnet 4.6 support adaptive
+    /// thinking + effort but NOT the xhigh tier (so they correctly clamp
+    /// `XHigh -> High`). Scoped to the `anthropic-messages` transport (native
+    /// Anthropic and Anthropic-compatible providers that route through
+    /// `AnthropicProvider`); the `claude-` id check additionally excludes
+    /// Anthropic-compatible non-Claude models on that transport (e.g. MiniMax).
+    ///
+    /// Without this, the registry clamps `XHigh -> High` before
+    /// `AnthropicProvider::build_request` runs and the transport's `"xhigh"`
+    /// effort arm is dead at runtime (the same reasoning as the DeepSeek
+    /// `is_deepseek_reasoning_model` path; gh #116).
+    /// Ref: https://platform.claude.com/docs/en/build-with-claude/effort
+    fn is_anthropic_xhigh_effort_model(&self) -> bool {
+        if !self.model.reasoning || self.model.api != "anthropic-messages" {
+            return false;
+        }
+        let id = self.model.id.to_ascii_lowercase();
+        let Some(pos) = id.find("claude-") else {
+            return false;
+        };
+        let id = &id[pos..];
+        id.starts_with("claude-opus-4-7")
+            || id.starts_with("claude-opus-4-8")
+            || id.starts_with("claude-fable-")
+            || id.starts_with("claude-mythos-")
+    }
+
+    /// Whether this is a DeepSeek reasoning model whose thinking-mode API accepts
+    /// `reasoning_effort: "max"`.
+    ///
+    /// DeepSeek reasoning models route through the DeepSeek thinking format on
+    /// the chat-completions transport (see `OpenAIProvider::reasoning_style`), and
+    /// DeepSeek maps the `xhigh` thinking level to `reasoning_effort: "max"` in
+    /// thinking mode (gh #114; https://api-docs.deepseek.com/guides/thinking_mode).
+    /// They therefore genuinely support xhigh — without this the registry clamps
+    /// `XHigh -> High` before `build_request()` runs and the serializer's `"max"`
+    /// arm is dead at runtime.
+    ///
+    /// Detected the same way the transport detects DeepSeek (provider id
+    /// `deepseek`, or a `deepseek.com` base URL) AND restricted to reasoning
+    /// models, so the non-thinking `deepseek-chat` / V3 family is never enabled
+    /// (those are additionally excluded upstream, since `available_thinking_levels`
+    /// and `clamp_thinking_level` short-circuit on non-reasoning models).
+    fn is_deepseek_reasoning_model(&self) -> bool {
+        if !self.model.reasoning {
+            return false;
+        }
+        let provider_is_deepseek = canonical_provider_id(&self.model.provider)
+            .is_some_and(|canonical| canonical == "deepseek")
+            || self.model.provider.eq_ignore_ascii_case("deepseek");
+        let base_is_deepseek = self
+            .model
+            .base_url
+            .to_ascii_lowercase()
+            .contains("deepseek.com");
+        provider_is_deepseek || base_is_deepseek
     }
 
     /// Return the thinking levels that should be exposed for this model.
@@ -150,6 +213,25 @@ pub struct CompatConfig {
     // ── Gateway/routing metadata ────────────────────────────────────────
     pub open_router_routing: Option<serde_json::Value>,
     pub vercel_gateway_routing: Option<serde_json::Value>,
+
+    // ── Reasoning / thinking controls (modern per-model capability data) ──
+    /// Map pi's thinking levels onto the provider's native effort/thinking
+    /// vocabulary, e.g. `{"xhigh": "max"}`. Keyed by the lowercase
+    /// `ThinkingLevel` name (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`).
+    /// Lets the catalog steer a transport's effort serialization without code
+    /// changes (gh #117). When absent, transports apply their built-in mapping.
+    pub thinking_level_map: Option<HashMap<String, String>>,
+    /// Force the modern adaptive-thinking API (`thinking: {type: "adaptive"}`
+    /// plus `output_config.effort`) instead of the deprecated `budget_tokens`
+    /// extended-thinking path. Authoritative over a transport's built-in
+    /// model-id heuristic; the heuristic is consulted only when this is `None`
+    /// (gh #116/#117).
+    pub force_adaptive_thinking: Option<bool>,
+    /// Provider-specific thinking serialization dialect carried from the
+    /// catalog (e.g. `"zai"`, `"deepseek"`). Surfaced so transports can honor
+    /// per-model thinking formats; previously silently dropped on parse
+    /// (gh #117).
+    pub thinking_format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,8 +255,11 @@ struct LegacyGeneratedModel {
     provider: String,
     #[serde(default)]
     base_url: String,
+    /// Per-model reasoning capability as declared by the catalog. `Some` when
+    /// the catalog explicitly carries the field (the common case — every
+    /// generated entry sets it); `None` only when a future entry omits it.
     #[serde(default)]
-    reasoning: bool,
+    reasoning: Option<bool>,
     #[serde(default)]
     input: Vec<String>,
     #[serde(default)]
@@ -847,8 +932,18 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
         return Some(false);
     }
 
-    // DeepSeek: deepseek-reasoner (R1) is reasoning; deepseek-chat (V3) and others are not.
-    if id.starts_with("deepseek-reasoner") || id.starts_with("deepseek-r") {
+    // DeepSeek: thinking-mode models are reasoning.
+    // - deepseek-reasoner (legacy thinking alias) and the R-series (R1).
+    // - deepseek-v4-pro / deepseek-v4-flash: the current V4 models, both
+    //   thinking-capable with reasoning_effort high/max (gh #114;
+    //   https://api-docs.deepseek.com/news/news260424).
+    // The legacy non-thinking deepseek-chat (V3 / non-thinking alias) and
+    // deepseek-coder are NOT reasoning.
+    if id.starts_with("deepseek-reasoner")
+        || id.starts_with("deepseek-r")
+        || id.starts_with("deepseek-v4-pro")
+        || id.starts_with("deepseek-v4-flash")
+    {
         return Some(true);
     }
     if id.starts_with("deepseek") {
@@ -982,6 +1077,22 @@ fn resolve_provider_api_key_cached(
         .clone()
 }
 
+/// Native-adapter providers whose request path resolves its own endpoint and
+/// therefore does not need a non-empty seed `base_url` to be routable. Today
+/// this is only `github-copilot`, whose adapter discovers the Copilot proxy
+/// endpoint via GitHub's token-exchange API (see `providers::copilot`). Such
+/// providers can be safely seeded from the upstream snapshot /
+/// models-override.json even though their seed default carries an empty
+/// `base_url`. Contrast with `azure-openai` / `sap-ai-core`, which also have an
+/// empty seed `base_url` but require a user-supplied resource/base_url and must
+/// stay excluded. (#100)
+fn provider_self_routes_without_base_url(canonical_provider: &str) -> bool {
+    matches!(
+        canonical_provider.to_ascii_lowercase().as_str(),
+        "github-copilot"
+    )
+}
+
 fn append_upstream_nonlegacy_models(
     auth: &AuthStorage,
     models: &mut Vec<ModelEntry>,
@@ -997,7 +1108,25 @@ fn append_upstream_nonlegacy_models(
         }
         let canonical_provider = canonical_provider_id(provider).unwrap_or(provider);
         if legacy_providers.contains(&canonical_provider.to_ascii_lowercase()) {
-            continue;
+            // Native-adapter legacy providers (openai-codex, github-copilot,
+            // google-gemini-cli, google-antigravity) should still honor
+            // snapshot / models-override.json entries so their model IDs become
+            // resolvable registry entries instead of dead autocomplete
+            // candidates. We admit them only when their native adapter can
+            // route a request without per-user configuration. Providers whose
+            // seed default has an empty base_url AND lack a self-resolving
+            // native adapter (notably azure-openai / sap-ai-core, which need a
+            // user-supplied resource/base_url) would fail at request time, so
+            // they stay excluded. (#100)
+            match native_adapter_seed_defaults(canonical_provider) {
+                Some(seed)
+                    if !seed.base_url.is_empty()
+                        || provider_self_routes_without_base_url(canonical_provider) =>
+                {
+                    // fall through and admit the snapshot/override entries
+                }
+                _ => continue,
+            }
         }
 
         let Some(defaults) = ad_hoc_provider_defaults(canonical_provider)
@@ -1165,7 +1294,15 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
                 api: api_string,
                 provider: provider.to_string(),
                 base_url,
-                reasoning: effective_reasoning(&normalized_model_id, legacy.reasoning),
+                // The catalog is authoritative for per-model reasoning: every
+                // generated entry carries an explicit `reasoning` flag, so honor
+                // it directly rather than letting the built-in `model_is_reasoning`
+                // heuristic override it (gh #117 — a stale heuristic must not win
+                // over correct catalog data, e.g. #114). The heuristic is only a
+                // fallback for the rare entry that omits the field.
+                reasoning: legacy
+                    .reasoning
+                    .unwrap_or_else(|| effective_reasoning(&normalized_model_id, false)),
                 input,
                 cost: if mode == ModelRegistryLoadMode::Full {
                     legacy.cost.clone().unwrap_or_else(|| default_cost.clone())
@@ -1929,6 +2066,17 @@ fn merge_compat(
                     .vercel_gateway_routing
                     .clone()
                     .or_else(|| provider.vercel_gateway_routing.clone()),
+                thinking_level_map: model
+                    .thinking_level_map
+                    .clone()
+                    .or_else(|| provider.thinking_level_map.clone()),
+                force_adaptive_thinking: model
+                    .force_adaptive_thinking
+                    .or(provider.force_adaptive_thinking),
+                thinking_format: model
+                    .thinking_format
+                    .clone()
+                    .or_else(|| provider.thinking_format.clone()),
             })
         }
     }
@@ -2231,10 +2379,22 @@ where
 }
 
 pub(crate) fn ad_hoc_model_entry(provider: &str, model_id: &str) -> Option<ModelEntry> {
-    ad_hoc_model_entry_with_sap_resolver(provider, model_id, || {
-        let auth = AuthStorage::load(crate::config::Config::auth_path()).ok()?;
-        resolve_sap_credentials(&auth)
-    })
+    let auth = AuthStorage::load(crate::config::Config::auth_path()).ok();
+    let mut entry = ad_hoc_model_entry_with_sap_resolver(provider, model_id, || {
+        auth.as_ref().and_then(resolve_sap_credentials)
+    })?;
+
+    // Synthesized entries start without credentials. Resolve them from stored
+    // auth / environment variables so `model_entry_is_ready` reflects reality
+    // and downstream selection logic does not treat an otherwise-usable
+    // provider as unconfigured.
+    if entry.api_key.is_none()
+        && let Some(auth) = auth.as_ref()
+    {
+        entry.api_key = normalize_api_key_opt(auth.resolve_api_key(provider, None));
+    }
+
+    Some(entry)
 }
 
 #[cfg(test)]
@@ -2511,6 +2671,34 @@ mod tests {
             .expect("gitlab upstream model");
         assert_eq!(gitlab.model.api, "gitlab-chat");
         assert!(gitlab.auth_header);
+    }
+
+    #[test]
+    fn built_in_models_seed_github_copilot_snapshot_entries_but_not_azure_openai() {
+        // #100: native-adapter legacy providers that self-route (github-copilot)
+        // must surface their snapshot / models-override.json model IDs as real
+        // registry entries so autocomplete candidates actually resolve. Providers
+        // that need per-user routing config (azure-openai, empty seed base_url and
+        // no self-resolving adapter) must stay excluded.
+        let (_dir, auth) = test_auth_storage();
+        let models = built_in_models(&auth, ModelRegistryLoadMode::Full);
+
+        let copilot = models
+            .iter()
+            .find(|m| m.model.provider == "github-copilot" && m.model.id == "claude-opus-4.6")
+            .expect("github-copilot snapshot model should be admitted");
+        assert_eq!(copilot.model.api, "openai-completions");
+        assert!(copilot.auth_header);
+
+        // azure-openai has an empty seed base_url and requires a user-supplied
+        // resource, so its snapshot IDs must NOT become registry entries. The
+        // snapshot lists an azure-only "model-router" id (absent from the
+        // curated legacy catalog), which serves as a canary: if the exclusion
+        // regressed, this snapshot-only id would leak into the registry.
+        assert!(
+            !models.iter().any(|m| m.model.id == "model-router"),
+            "azure-openai snapshot entries (e.g. model-router) must not be admitted from the upstream snapshot"
+        );
     }
 
     #[test]
@@ -3413,6 +3601,20 @@ mod tests {
         }
     }
 
+    /// Like `make_model_entry`, but lets a test set the provider id and base URL
+    /// (needed to exercise DeepSeek thinking-format detection — gh #114).
+    fn make_model_entry_with_provider(
+        id: &str,
+        reasoning: bool,
+        provider: &str,
+        base_url: &str,
+    ) -> ModelEntry {
+        let mut entry = make_model_entry(id, reasoning);
+        entry.model.provider = provider.to_string();
+        entry.model.base_url = base_url.to_string();
+        entry
+    }
+
     #[test]
     fn supports_xhigh_for_known_models() {
         assert!(make_model_entry("gpt-5.1-codex-max", true).supports_xhigh());
@@ -3508,6 +3710,258 @@ mod tests {
             entry.clamp_thinking_level(ThinkingLevel::XHigh),
             ThinkingLevel::XHigh,
         );
+    }
+
+    // ─── DeepSeek xhigh support (gh #114) ────────────────────────────
+
+    #[test]
+    fn supports_xhigh_true_for_deepseek_reasoning_models() {
+        // Detected via the provider id...
+        assert!(
+            make_model_entry_with_provider(
+                "deepseek-v4-pro",
+                true,
+                "deepseek",
+                "https://api.deepseek.com"
+            )
+            .supports_xhigh()
+        );
+        assert!(
+            make_model_entry_with_provider(
+                "deepseek-reasoner",
+                true,
+                "deepseek",
+                "https://api.deepseek.com"
+            )
+            .supports_xhigh()
+        );
+        // ...and via a deepseek.com base URL even if the provider id is generic.
+        assert!(
+            make_model_entry_with_provider(
+                "deepseek-v4-flash",
+                true,
+                "custom",
+                "https://api.deepseek.com/v1"
+            )
+            .supports_xhigh()
+        );
+    }
+
+    #[test]
+    fn supports_xhigh_false_for_non_reasoning_deepseek() {
+        // deepseek-chat / V3 are non-thinking models: xhigh must stay off.
+        assert!(
+            !make_model_entry_with_provider(
+                "deepseek-chat",
+                false,
+                "deepseek",
+                "https://api.deepseek.com"
+            )
+            .supports_xhigh()
+        );
+    }
+
+    #[test]
+    fn available_thinking_levels_deepseek_reasoning_includes_xhigh() {
+        use crate::model::ThinkingLevel;
+        let entry = make_model_entry_with_provider(
+            "deepseek-v4-pro",
+            true,
+            "deepseek",
+            "https://api.deepseek.com",
+        );
+        assert_eq!(
+            entry.available_thinking_levels(),
+            vec![
+                ThinkingLevel::Off,
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::XHigh,
+            ]
+        );
+    }
+
+    #[test]
+    fn clamp_xhigh_preserved_for_deepseek_reasoning() {
+        use crate::model::ThinkingLevel;
+        let entry = make_model_entry_with_provider(
+            "deepseek-v4-pro",
+            true,
+            "deepseek",
+            "https://api.deepseek.com",
+        );
+        assert_eq!(
+            entry.clamp_thinking_level(ThinkingLevel::XHigh),
+            ThinkingLevel::XHigh
+        );
+    }
+
+    /// End-to-end regression for gh #114: the runtime path is
+    /// `clamp_thinking_level` -> `OpenAIProvider::build_request`. #113's unit test
+    /// called `build_request()` directly with `XHigh`, bypassing the clamp that
+    /// (before this fix) downgraded `XHigh -> High` for DeepSeek. This drives the
+    /// full chain and asserts the wire body carries `reasoning_effort: "max"`.
+    #[test]
+    fn deepseek_reasoning_xhigh_survives_clamp_and_serializes_as_max() {
+        use crate::model::ThinkingLevel;
+        use crate::provider::{Context, StreamOptions};
+
+        let entry = make_model_entry_with_provider(
+            "deepseek-v4-pro",
+            true,
+            "deepseek",
+            "https://api.deepseek.com",
+        );
+
+        // (1) The clamp must pass XHigh through (the #114 gap).
+        let effective = entry.clamp_thinking_level(ThinkingLevel::XHigh);
+        assert_eq!(
+            effective,
+            ThinkingLevel::XHigh,
+            "clamp must not downgrade xhigh for a DeepSeek reasoning model"
+        );
+
+        // (2) Feed the clamped level into the real request builder.
+        let provider = crate::providers::openai::OpenAIProvider::new(entry.model.id.as_str())
+            .with_provider_name(entry.model.provider.as_str())
+            .with_reasoning(entry.model.reasoning);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![crate::model::Message::User(crate::model::UserMessage {
+                content: crate::model::UserContent::Text("solve it".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<crate::provider::ToolDef>::new().into(),
+        };
+        let body = |level: ThinkingLevel| {
+            let options = StreamOptions {
+                thinking_level: Some(level),
+                ..Default::default()
+            };
+            serde_json::to_value(provider.build_request(&context, &options))
+                .expect("serialize request")
+        };
+
+        let xhigh_body = body(effective);
+        assert_eq!(xhigh_body["thinking"]["type"], "enabled");
+        assert_eq!(
+            xhigh_body["reasoning_effort"], "max",
+            "xhigh must reach the wire as reasoning_effort=max end-to-end"
+        );
+
+        // (3) high (and the other levels) still serialize exactly as before.
+        let high = entry.clamp_thinking_level(ThinkingLevel::High);
+        assert_eq!(high, ThinkingLevel::High);
+        let high_body = body(high);
+        assert_eq!(high_body["thinking"]["type"], "enabled");
+        assert_eq!(high_body["reasoning_effort"], "high");
+    }
+
+    /// Stronger end-to-end variant that derives the `reasoning` flag through the
+    /// REAL classification path (`model_is_reasoning` -> `effective_reasoning`)
+    /// instead of hardcoding `true`. This is the case #114's first cut missed: in
+    /// production `model_is_reasoning("deepseek-v4-pro")` was `Some(false)`, so the
+    /// model was non-reasoning and the whole feature was inert for it.
+    #[test]
+    fn deepseek_v4_pro_real_registry_path_xhigh_reaches_wire_as_max() {
+        use crate::model::ThinkingLevel;
+        use crate::provider::{Context, StreamOptions};
+
+        // The production reasoning flag is DERIVED, not hardcoded.
+        assert_eq!(model_is_reasoning("deepseek-v4-pro"), Some(true));
+        assert_eq!(model_is_reasoning("deepseek-v4-flash"), Some(true));
+        // Even against a non-reasoning provider default, the model classification wins.
+        let reasoning = effective_reasoning("deepseek-v4-pro", false);
+        assert!(
+            reasoning,
+            "deepseek-v4-pro must be reasoning via effective_reasoning/model_is_reasoning"
+        );
+
+        // Build the entry with the DERIVED reasoning flag (not a hardcoded true).
+        let entry = make_model_entry_with_provider(
+            "deepseek-v4-pro",
+            reasoning,
+            "deepseek",
+            "https://api.deepseek.com",
+        );
+        assert!(entry.supports_xhigh());
+        let effective = entry.clamp_thinking_level(ThinkingLevel::XHigh);
+        assert_eq!(effective, ThinkingLevel::XHigh);
+
+        let provider = crate::providers::openai::OpenAIProvider::new(entry.model.id.as_str())
+            .with_provider_name(entry.model.provider.as_str())
+            .with_reasoning(entry.model.reasoning);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![crate::model::Message::User(crate::model::UserMessage {
+                content: crate::model::UserContent::Text("solve it".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<crate::provider::ToolDef>::new().into(),
+        };
+        let options = StreamOptions {
+            thinking_level: Some(effective),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(provider.build_request(&context, &options))
+            .expect("serialize request");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            body["reasoning_effort"], "max",
+            "xhigh must reach the wire as max via the real registry classification path"
+        );
+    }
+
+    /// `deepseek-chat` classifies as non-reasoning, so it exposes only `[Off]`,
+    /// the clamp pins to Off, and the transport emits NO `thinking`/`reasoning_effort`
+    /// (pre-#113 wire body preserved — gh #114, finding 2).
+    #[test]
+    fn deepseek_chat_non_reasoning_emits_no_thinking_end_to_end() {
+        use crate::model::ThinkingLevel;
+        use crate::provider::{Context, StreamOptions};
+
+        assert_eq!(model_is_reasoning("deepseek-chat"), Some(false));
+        let reasoning = effective_reasoning("deepseek-chat", true);
+        assert!(!reasoning, "deepseek-chat must classify as non-reasoning");
+
+        let entry = make_model_entry_with_provider(
+            "deepseek-chat",
+            reasoning,
+            "deepseek",
+            "https://api.deepseek.com",
+        );
+        assert!(!entry.supports_xhigh());
+        assert_eq!(entry.available_thinking_levels(), vec![ThinkingLevel::Off]);
+        // Whatever the user asks for, a non-reasoning model clamps to Off.
+        assert_eq!(
+            entry.clamp_thinking_level(ThinkingLevel::XHigh),
+            ThinkingLevel::Off
+        );
+
+        let provider = crate::providers::openai::OpenAIProvider::new(entry.model.id.as_str())
+            .with_provider_name(entry.model.provider.as_str())
+            .with_reasoning(entry.model.reasoning);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![crate::model::Message::User(crate::model::UserMessage {
+                content: crate::model::UserContent::Text("hi".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<crate::provider::ToolDef>::new().into(),
+        };
+        let options = StreamOptions {
+            thinking_level: Some(entry.clamp_thinking_level(ThinkingLevel::XHigh)),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(provider.build_request(&context, &options))
+            .expect("serialize request");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3816,14 +4270,17 @@ mod tests {
 
     #[test]
     fn ad_hoc_model_entry_creates_valid_entry() {
-        let entry = ad_hoc_model_entry("groq", "llama-3-70b").unwrap();
+        // Use the pure SAP-resolver seam so the assertion stays hermetic and
+        // independent of ambient `GROQ_API_KEY` / on-disk auth (the public
+        // `ad_hoc_model_entry` intentionally resolves credentials).
+        let entry = ad_hoc_model_entry_with_sap_resolver("groq", "llama-3-70b", || None).unwrap();
         assert_eq!(entry.model.id, "llama-3-70b");
         assert_eq!(entry.model.name, "llama-3-70b");
         assert_eq!(entry.model.provider, "groq");
         assert_eq!(entry.model.api, "openai-completions");
         assert!(entry.model.base_url.contains("groq.com"));
         assert!(entry.auth_header); // openai-compatible → auth_header = true
-        assert!(entry.api_key.is_none()); // no auth lookup
+        assert!(entry.api_key.is_none()); // pure synthesis performs no auth lookup
     }
 
     #[test]
@@ -4064,6 +4521,32 @@ mod tests {
                 .any(|entry| entry.model.provider == "acme-local" && entry.model.id == "dev-model"),
             "keyless models should be considered available"
         );
+    }
+
+    #[test]
+    fn local_providers_synthesize_ready_keyless_entries() {
+        // #104: ollama, llamacpp and mistralrs are local OpenAI-compatible
+        // providers with no API key. A `--provider X --model Y` invocation
+        // synthesizes an ad-hoc entry; that entry must be considered READY
+        // without any configured credential, so the agent attempts a connection
+        // to the local server instead of erroring with "Missing API key".
+        for provider in ["ollama", "llamacpp", "mistralrs"] {
+            let entry = ad_hoc_model_entry(provider, "some-local-model")
+                .unwrap_or_else(|| unreachable!("expected ad-hoc entry for '{provider}'"));
+            assert_eq!(entry.model.provider, provider);
+            assert!(
+                !entry.auth_header,
+                "{provider} ad-hoc entry must not require an auth header"
+            );
+            assert!(
+                !model_requires_configured_credential(&entry),
+                "{provider} must not require a configured credential"
+            );
+            assert!(
+                model_entry_is_ready(&entry),
+                "{provider} ad-hoc entry must be ready without an API key"
+            );
+        }
     }
 
     #[test]
@@ -4486,6 +4969,8 @@ mod tests {
         // DeepSeek
         assert_eq!(model_is_reasoning("deepseek-reasoner"), Some(true));
         assert_eq!(model_is_reasoning("deepseek-r1"), Some(true));
+        assert_eq!(model_is_reasoning("deepseek-v4-pro"), Some(true));
+        assert_eq!(model_is_reasoning("deepseek-v4-flash"), Some(true));
         assert_eq!(model_is_reasoning("deepseek-chat"), Some(false));
         assert_eq!(model_is_reasoning("deepseek-coder"), Some(false));
 

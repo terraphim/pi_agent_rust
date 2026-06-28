@@ -12,10 +12,11 @@ use crate::error::{Error, Result};
 use crate::http::client::Client;
 use crate::model::{
     AssistantMessage, ContentBlock, Message, StopReason, StreamEvent, TextContent, ThinkingContent,
-    ToolCall, Usage, UserContent,
+    ThinkingLevel, ToolCall, Usage, UserContent,
 };
 use crate::models::CompatConfig;
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
+use crate::provider_metadata::canonical_provider_id;
 use crate::sse::SseStream;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -104,6 +105,11 @@ pub struct OpenAIProvider {
     base_url: String,
     provider: String,
     compat: Option<CompatConfig>,
+    /// Whether the model is a reasoning model. Gates the DeepSeek thinking
+    /// dialect so non-reasoning DeepSeek models (e.g. `deepseek-chat`) never
+    /// emit `thinking`/`reasoning_effort` (gh #114). Defaults to `false`; the
+    /// registry sets it from `ModelEntry::model.reasoning` via `with_reasoning`.
+    reasoning: bool,
 }
 
 impl OpenAIProvider {
@@ -115,7 +121,19 @@ impl OpenAIProvider {
             base_url: OPENAI_API_URL.to_string(),
             provider: "openai".to_string(),
             compat: None,
+            reasoning: false,
         }
+    }
+
+    /// Set whether the underlying model is a reasoning model.
+    ///
+    /// Only consulted by the DeepSeek thinking dialect (`reasoning_style`): a
+    /// non-reasoning DeepSeek model serializes with no `thinking`/`reasoning_effort`
+    /// (byte-for-byte as before #113), while a reasoning one forwards the level.
+    #[must_use]
+    pub const fn with_reasoning(mut self, reasoning: bool) -> Self {
+        self.reasoning = reasoning;
+        self
     }
 
     /// Override the provider name reported in streamed events.
@@ -150,6 +168,29 @@ impl OpenAIProvider {
     pub fn with_compat(mut self, compat: Option<CompatConfig>) -> Self {
         self.compat = compat;
         self
+    }
+
+    /// Detect a provider-specific reasoning dialect for this transport.
+    ///
+    /// DeepSeek is identified the same way `ModelEntry::is_deepseek_reasoning_model`
+    /// does it — by the canonical provider id (so the `deep-seek` alias also
+    /// matches) or a `deepseek.com` base URL — AND only for reasoning models, so a
+    /// non-reasoning DeepSeek model (e.g. `deepseek-chat`) emits no
+    /// `thinking`/`reasoning_effort` (byte-for-byte as before #113, gh #114).
+    /// Every other OpenAI-compatible provider is left untouched.
+    fn reasoning_style(&self) -> Option<ReasoningStyle> {
+        if !self.reasoning {
+            return None;
+        }
+        let provider_is_deepseek = canonical_provider_id(&self.provider)
+            .is_some_and(|canonical| canonical == "deepseek")
+            || self.provider.eq_ignore_ascii_case("deepseek");
+        let base_is_deepseek = self.base_url.to_ascii_lowercase().contains("deepseek.com");
+        if provider_is_deepseek || base_is_deepseek {
+            Some(ReasoningStyle::DeepSeek)
+        } else {
+            None
+        }
     }
 
     /// Build the request body for the OpenAI API.
@@ -199,6 +240,23 @@ impl OpenAIProvider {
 
         let stream_options = Some(OpenAIStreamOptions { include_usage });
 
+        // Forward the reasoning level for providers with a request-side reasoning
+        // dialect. Only DeepSeek today; all other transports get `(None, None)`,
+        // so their serialized body is unchanged. DeepSeek collapses `low`/`medium`
+        // into `high` and `xhigh` into `max` itself, so we only emit the values it
+        // documents and let `off` request the explicit non-thinking path.
+        let (thinking, reasoning_effort) = match self.reasoning_style() {
+            Some(ReasoningStyle::DeepSeek) => match options.thinking_level.unwrap_or_default() {
+                ThinkingLevel::Off => (Some(OpenAIThinking { kind: "disabled" }), None),
+                ThinkingLevel::High => (Some(OpenAIThinking { kind: "enabled" }), Some("high")),
+                ThinkingLevel::XHigh => (Some(OpenAIThinking { kind: "enabled" }), Some("max")),
+                ThinkingLevel::Minimal | ThinkingLevel::Low | ThinkingLevel::Medium => {
+                    (Some(OpenAIThinking { kind: "enabled" }), None)
+                }
+            },
+            None => (None, None),
+        };
+
         OpenAIRequest {
             model: &self.model,
             messages,
@@ -208,6 +266,8 @@ impl OpenAIProvider {
             tools,
             stream: true,
             stream_options,
+            thinking,
+            reasoning_effort,
         }
     }
 
@@ -304,18 +364,24 @@ impl Provider for OpenAIProvider {
         let auth_value = if authorization_override.is_some() {
             None
         } else {
-            Some(
-                options
-                    .api_key
-                    .clone()
-                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                    .ok_or_else(|| {
-                        Error::provider(
-                            self.name(),
-                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
-                        )
-                    })?,
-            )
+            let resolved = options
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+            match resolved {
+                Some(key) => Some(key),
+                // Local / self-hosted providers (ollama, llamacpp, mistralrs, …)
+                // expose an OpenAI-compatible server on localhost and require NO
+                // API key. For these we proceed without an Authorization header
+                // instead of failing, matching how ollama already works. (#104)
+                None if crate::provider_metadata::provider_is_keyless_local(self.name()) => None,
+                None => {
+                    return Err(Error::provider(
+                        self.name(),
+                        "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
+                    ));
+                }
+            }
         };
 
         let request_body = self.build_request_json(context, options)?;
@@ -865,11 +931,42 @@ pub struct OpenAIRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<OpenAIStreamOptions>,
+    /// DeepSeek-only thinking toggle (`{"type": "enabled" | "disabled"}`). Other
+    /// OpenAI-compatible providers never set this, so it serializes away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<OpenAIThinking>,
+    /// DeepSeek-only reasoning effort (`"high"` | `"max"`). DeepSeek maps
+    /// `low`/`medium` to `high` and `xhigh` to `max` itself, so we only emit the
+    /// two values it documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAIStreamOptions {
     include_usage: bool,
+}
+
+/// DeepSeek's `thinking` request object on the chat-completions transport.
+/// `{"type": "enabled"}` turns on thinking mode; `{"type": "disabled"}` forces
+/// the non-thinking path. Serialized only for DeepSeek (see `ReasoningStyle`).
+#[derive(Debug, Serialize)]
+struct OpenAIThinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+/// Request-side reasoning dialect for OpenAI-compatible providers that take
+/// non-standard reasoning controls. The plain Chat Completions transport has no
+/// reasoning toggle, so this is `None` for OpenAI/Groq/OpenRouter/etc. and the
+/// emitted body is byte-for-byte unchanged for them. Kept as an enum so other
+/// dialects (zai/qwen/openrouter "reasoning") can be added without touching the
+/// `build_request` call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningStyle {
+    /// DeepSeek: `thinking: {type: enabled|disabled}` + `reasoning_effort`
+    /// (`high`|`max`). Mirrors the legacy `@earendil-works/pi-ai` `thinkingFormat`.
+    DeepSeek,
 }
 
 #[derive(Debug, Serialize)]
@@ -1296,6 +1393,141 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_deepseek_forwards_thinking_and_reasoning_effort() {
+        // Builds the serialized request body for a given thinking level.
+        let body = |provider: &OpenAIProvider, level: crate::model::ThinkingLevel| {
+            let context = Context {
+                system_prompt: None,
+                messages: vec![Message::User(crate::model::UserMessage {
+                    content: UserContent::Text("Solve it".to_string()),
+                    timestamp: 0,
+                })]
+                .into(),
+                tools: Vec::<ToolDef>::new().into(),
+            };
+            let options = StreamOptions {
+                thinking_level: Some(level),
+                ..Default::default()
+            };
+            serde_json::to_value(provider.build_request(&context, &options))
+                .expect("serialize request")
+        };
+
+        // Detected via the provider id. `with_reasoning(true)` mirrors the
+        // registry wiring for a DeepSeek reasoning model (deepseek-v4-pro).
+        let ds = OpenAIProvider::new("deepseek-v4-pro")
+            .with_provider_name("deepseek")
+            .with_reasoning(true);
+
+        let off = body(&ds, crate::model::ThinkingLevel::Off);
+        assert_eq!(off["thinking"]["type"], "disabled");
+        assert!(
+            off.get("reasoning_effort").is_none(),
+            "off must not send reasoning_effort"
+        );
+
+        let high = body(&ds, crate::model::ThinkingLevel::High);
+        assert_eq!(high["thinking"]["type"], "enabled");
+        assert_eq!(high["reasoning_effort"], "high");
+
+        let xhigh = body(&ds, crate::model::ThinkingLevel::XHigh);
+        assert_eq!(xhigh["thinking"]["type"], "enabled");
+        assert_eq!(xhigh["reasoning_effort"], "max");
+
+        // medium/low/minimal enable thinking but let DeepSeek pick the effort.
+        let medium = body(&ds, crate::model::ThinkingLevel::Medium);
+        assert_eq!(medium["thinking"]["type"], "enabled");
+        assert!(medium.get("reasoning_effort").is_none());
+
+        // Detected via the base URL even when the provider id is generic.
+        let ds_by_url = OpenAIProvider::new("deepseek-v4-pro")
+            .with_base_url("https://api.deepseek.com/v1/chat/completions".to_string())
+            .with_reasoning(true);
+        let high_url = body(&ds_by_url, crate::model::ThinkingLevel::High);
+        assert_eq!(high_url["thinking"]["type"], "enabled");
+        assert_eq!(high_url["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_build_request_non_reasoning_deepseek_omits_thinking() {
+        // A non-reasoning DeepSeek model (e.g. deepseek-chat) must NOT emit the
+        // `thinking` toggle or `reasoning_effort`, even though the provider is
+        // deepseek — pre-#113 wire behavior is preserved (gh #114, finding 2).
+        let provider = OpenAIProvider::new("deepseek-chat")
+            .with_provider_name("deepseek")
+            .with_reasoning(false);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("hi".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<ToolDef>::new().into(),
+        };
+        // Even at Off (the default/clamped level) there must be no thinking field.
+        let options = StreamOptions {
+            thinking_level: Some(crate::model::ThinkingLevel::Off),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(provider.build_request(&context, &options))
+            .expect("serialize request");
+        assert!(value.get("thinking").is_none());
+        assert!(value.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_build_request_deepseek_provider_alias_detected() {
+        // The `deep-seek` provider alias canonicalizes to `deepseek`, so the
+        // thinking dialect must fire for it too (gh #114, finding 3) — matching
+        // `ModelEntry::is_deepseek_reasoning_model`'s `canonical_provider_id` use.
+        let provider = OpenAIProvider::new("deepseek-v4-pro")
+            .with_provider_name("deep-seek")
+            .with_reasoning(true);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("solve it".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<ToolDef>::new().into(),
+        };
+        let options = StreamOptions {
+            thinking_level: Some(crate::model::ThinkingLevel::XHigh),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(provider.build_request(&context, &options))
+            .expect("serialize request");
+        assert_eq!(value["thinking"]["type"], "enabled");
+        assert_eq!(value["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn test_build_request_non_deepseek_omits_reasoning_controls() {
+        let provider = OpenAIProvider::new("gpt-4o");
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("hi".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::<ToolDef>::new().into(),
+        };
+        let options = StreamOptions {
+            thinking_level: Some(crate::model::ThinkingLevel::High),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(provider.build_request(&context, &options))
+            .expect("serialize request");
+        // A non-DeepSeek openai-completions provider serializes exactly as before:
+        // no thinking toggle and no reasoning_effort regardless of thinking level.
+        assert!(value.get("thinking").is_none());
+        assert!(value.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn test_stream_accumulates_tool_call_argument_deltas() {
         let events = vec![
             json!({ "choices": [{ "delta": {} }] }),
@@ -1575,6 +1807,78 @@ mod tests {
         let body: Value = serde_json::from_str(&captured.body).expect("request body json");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    /// Drive `provider.stream()` once against `base_url` with no API key and
+    /// return the `Result`. Keeps the request path deterministic and fast by
+    /// pointing at an unroutable address so we observe the *auth decision*
+    /// (key required vs. not) without depending on a full network round-trip.
+    fn stream_result_without_key(
+        provider_name: &str,
+        base_url: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let provider = OpenAIProvider::new("local-model")
+            .with_provider_name(provider_name)
+            .with_base_url(base_url.to_string());
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let options = StreamOptions {
+            api_key: None,
+            ..Default::default()
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async { provider.stream(&context, &options).await })
+    }
+
+    #[test]
+    fn test_stream_keyless_local_provider_does_not_require_key() {
+        // #104: local OpenAI-compatible providers (ollama, llamacpp, mistralrs)
+        // need NO API key. With no api_key configured the request path must NOT
+        // raise the "Missing API key for provider" error. We point at an
+        // unroutable address so the call resolves quickly: it either starts the
+        // stream or fails with a *connection* error — never the missing-key
+        // error. (Skipped when OPENAI_API_KEY is ambient, which would satisfy
+        // the key check for every provider and make the assertion vacuous.)
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        for provider in ["llamacpp", "mistralrs", "ollama"] {
+            // 127.0.0.1:1 is reserved/unroutable, so connect fails fast.
+            let result = stream_result_without_key(provider, "http://127.0.0.1:1/v1");
+            if let Err(err) = result {
+                assert!(
+                    !err.to_string().contains("Missing API key"),
+                    "{provider}: keyless local provider must not raise missing-key error, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_stream_unknown_provider_without_key_still_errors() {
+        // Guard: the keyless bypass is scoped to known local providers. An
+        // unknown provider with no key (and no ambient OPENAI_API_KEY) must
+        // still fail with the missing-key error — and does so synchronously,
+        // before any network I/O.
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return; // ambient key would satisfy the gate; skip in that env
+        }
+        let result =
+            stream_result_without_key("totally-unknown-cloud-provider", "http://127.0.0.1:1/v1");
+        let err = result.err().expect("missing key should error");
+        assert!(
+            err.to_string().contains("Missing API key"),
+            "expected missing-key error, got: {err}"
+        );
     }
 
     #[test]

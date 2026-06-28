@@ -33,9 +33,15 @@ pub mod cohere;
 pub mod copilot;
 pub mod gemini;
 pub mod gitlab;
+pub mod model_fetch;
 pub mod openai;
 pub mod openai_responses;
 pub mod vertex;
+
+pub use model_fetch::{
+    DISABLE_CACHE_ENV, MODEL_CACHE_TTL, fetch_provider_models, refresh_provider_models,
+    static_registry_models,
+};
 
 pub(super) fn first_non_empty_header_value_case_insensitive(
     headers: &HashMap<String, String>,
@@ -928,6 +934,7 @@ pub fn create_provider(
                     .with_provider_name(entry.model.provider.clone())
                     .with_base_url(normalize_openai_base(&entry.model.base_url))
                     .with_compat(entry.compat.clone())
+                    .with_reasoning(entry.model.reasoning)
                     .with_client(client),
             ))
         }

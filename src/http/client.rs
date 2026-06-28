@@ -11,14 +11,12 @@ use asupersync::http::h1::http_client::Scheme;
 use asupersync::io::ext::AsyncWriteExt;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::tcp::stream::TcpStream;
-use asupersync::tls::{TlsConnector, TlsConnectorBuilder};
+use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsError};
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::{self, BoxStream};
 use std::pin::Pin;
-#[cfg(not(test))]
-use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 const DEFAULT_USER_AGENT: &str = concat!("pi_agent_rust/", env!("CARGO_PKG_VERSION"));
@@ -38,32 +36,170 @@ const WRITE_ZERO_MAX_RETRIES: usize = 10;
 
 /// Initial backoff duration when a write returns `Ok(0)`.
 const WRITE_ZERO_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+/// Environment variable that overrides the request timeout, in seconds.
+///
+/// Applies to all providers; `0` disables the timeout entirely (unbounded).
+/// Clap binds the `--request-timeout` CLI flag and the `requestTimeoutSecs`
+/// setting to this same env var, so the three configuration surfaces share a
+/// single resolution path.
+pub const REQUEST_TIMEOUT_ENV: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
+
+/// Default request timeout for remote (cloud) providers.
+///
+/// Covers connect + request-write + response-header latency. 60s is generous
+/// for any healthy cloud API; if a remote provider has not produced response
+/// headers within a minute something is wrong.
 #[cfg(not(test))]
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_REMOTE_REQUEST_TIMEOUT_SECS: u64 = 60;
 
-fn default_request_timeout_from_env() -> Option<std::time::Duration> {
-    #[cfg(test)]
-    {
-        // Disable timeouts in unit tests to prevent `asupersync`'s virtual timer
-        // from instantly fast-forwarding and failing mock server requests.
-        None
-    }
+/// Default request timeout for *local* providers (Ollama, LM Studio, etc.).
+///
+/// Local inference servers frequently incur a large first-request latency: the
+/// model has to be loaded from disk into RAM/VRAM, which for a multi-GB model
+/// on a cold cache can take well over a minute (sometimes several). The cloud
+/// 60s default was too short for this and caused `pi --provider ollama ...` to
+/// fail with "Request timed out" while Ollama was still loading the model
+/// (pi_agent_rust#90).
+///
+/// 600s (10 minutes) is long enough to absorb realistic cold-start model loads
+/// while still bounding a truly hung/unreachable server so we never hang
+/// forever. Users who load enormous models on slow disks can raise it (or set
+/// it to `0` for unbounded) via `PI_HTTP_REQUEST_TIMEOUT_SECS` /
+/// `--request-timeout` / `requestTimeoutSecs`.
+#[cfg(not(test))]
+const DEFAULT_LOCAL_REQUEST_TIMEOUT_SECS: u64 = 600;
 
-    #[cfg(not(test))]
-    {
-        static REQUEST_TIMEOUT: OnceLock<Option<std::time::Duration>> = OnceLock::new();
-        *REQUEST_TIMEOUT.get_or_init(|| {
-            let timeout_secs = std::env::var("PI_HTTP_REQUEST_TIMEOUT_SECS")
-                .ok()
-                .and_then(|raw| raw.trim().parse::<u64>().ok())
-                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
-            if timeout_secs == 0 {
-                None
-            } else {
-                Some(std::time::Duration::from_secs(timeout_secs))
-            }
-        })
+/// How the request timeout should be resolved for a [`RequestBuilder`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestTimeout {
+    /// Resolve a provider-aware default at send time based on the target URL
+    /// (longer for local providers like Ollama, shorter for cloud APIs),
+    /// unless overridden by `PI_HTTP_REQUEST_TIMEOUT_SECS`.
+    Default,
+    /// Explicit timeout duration (from `.timeout()` or the global env override).
+    Explicit(std::time::Duration),
+    /// Explicitly unbounded (from `.no_timeout()` or `PI_HTTP_REQUEST_TIMEOUT_SECS=0`).
+    Disabled,
+}
+
+/// Process-global request-timeout override set explicitly by the application
+/// (from the `--request-timeout` CLI flag or the `requestTimeoutSecs` setting)
+/// before any provider request is made.
+///
+/// Sentinel `u64::MAX` means "unset" so this can be a plain atomic without a
+/// lock. `0` means "no timeout" (unbounded).
+#[cfg(not(test))]
+static REQUEST_TIMEOUT_OVERRIDE_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Set the process-global request-timeout override, in seconds.
+///
+/// `0` disables the timeout entirely (unbounded). Takes precedence over the
+/// provider-aware defaults but is itself lower precedence than a per-request
+/// `.timeout()` / `.no_timeout()` call. Should be called once during startup,
+/// before any HTTP request is issued. See pi_agent_rust#90.
+#[cfg(not(test))]
+pub fn set_request_timeout_override(secs: u64) {
+    // Reserve u64::MAX as the "unset" sentinel; clamp the (absurd) edge case so
+    // callers asking for that exact value still get a finite timeout.
+    let stored = if secs == u64::MAX { secs - 1 } else { secs };
+    REQUEST_TIMEOUT_OVERRIDE_SECS.store(stored, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// No-op override setter under `cfg(test)`, where timeouts are disabled.
+#[cfg(test)]
+#[allow(clippy::missing_const_for_fn)]
+pub fn set_request_timeout_override(_secs: u64) {}
+
+/// Read the global timeout override, if any.
+///
+/// Resolution order: an explicit application override (set via
+/// [`set_request_timeout_override`]) first, then the
+/// `PI_HTTP_REQUEST_TIMEOUT_SECS` environment variable. In both cases `0` =>
+/// [`RequestTimeout::Disabled`]; any other value => an explicit duration.
+/// Returns `None` when neither is set so the provider-aware default applies.
+#[cfg(not(test))]
+fn timeout_override(env_lookup: impl FnOnce() -> Option<String>) -> Option<RequestTimeout> {
+    let secs = match REQUEST_TIMEOUT_OVERRIDE_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        u64::MAX => env_lookup()?.trim().parse::<u64>().ok()?,
+        explicit => explicit,
+    };
+    Some(if secs == 0 {
+        RequestTimeout::Disabled
+    } else {
+        RequestTimeout::Explicit(std::time::Duration::from_secs(secs))
+    })
+}
+
+/// Returns `true` when the URL targets a local/loopback inference server.
+///
+/// Local providers (Ollama on `127.0.0.1:11434`, LM Studio on
+/// `127.0.0.1:1234`, etc.) can have very high first-request latency from
+/// on-demand model loading, so they get a more generous default timeout.
+fn url_is_local_provider(url: &str) -> bool {
+    let Ok(parsed) = ParsedUrl::parse(url) else {
+        return false;
+    };
+    let host = parsed.host.trim_matches(|c| c == '[' || c == ']');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host.starts_with("127.")
+        || host == "::1"
+        || host == "0.0.0.0"
+        || host.eq_ignore_ascii_case("localhost.localdomain")
+}
+
+/// Resolve the effective timeout for a request, honoring the global env
+/// override first, then falling back to a provider-aware default.
+#[cfg(not(test))]
+fn resolve_timeout(setting: RequestTimeout, url: &str) -> Option<std::time::Duration> {
+    let resolved = match setting {
+        RequestTimeout::Explicit(duration) => RequestTimeout::Explicit(duration),
+        RequestTimeout::Disabled => RequestTimeout::Disabled,
+        RequestTimeout::Default => timeout_override(|| std::env::var(REQUEST_TIMEOUT_ENV).ok())
+            .unwrap_or_else(|| {
+                let secs = if url_is_local_provider(url) {
+                    DEFAULT_LOCAL_REQUEST_TIMEOUT_SECS
+                } else {
+                    DEFAULT_REMOTE_REQUEST_TIMEOUT_SECS
+                };
+                RequestTimeout::Explicit(std::time::Duration::from_secs(secs))
+            }),
+    };
+    match resolved {
+        RequestTimeout::Explicit(duration) => Some(duration),
+        RequestTimeout::Disabled | RequestTimeout::Default => None,
     }
+}
+
+/// During unit tests, timeouts are disabled to prevent `asupersync`'s virtual
+/// timer from instantly fast-forwarding and failing mock server requests.
+#[cfg(test)]
+#[allow(clippy::missing_const_for_fn)]
+fn resolve_timeout(_setting: RequestTimeout, _url: &str) -> Option<std::time::Duration> {
+    None
+}
+
+/// Build a self-documenting timeout error message that tells the user the
+/// timeout that fired and how to raise it. Adds Ollama/local-provider-specific
+/// guidance (cold-start model load, model not pulled) when the target is a
+/// loopback inference server. See pi_agent_rust#90.
+fn timeout_error_message(url: &str, duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    let mut msg = format!(
+        "Request timed out after {secs}s. Raise the timeout with \
+         {REQUEST_TIMEOUT_ENV}=<seconds> (or `--request-timeout <seconds>`, or \
+         `requestTimeoutSecs` in settings.json); set it to 0 for no timeout."
+    );
+    if url_is_local_provider(url) {
+        msg.push_str(
+            " For local providers like Ollama, the first request often blocks \
+             while the model loads into memory (a cold start can take minutes), \
+             and the model must already be pulled — try `ollama pull <model>` \
+             and confirm the server is reachable (`ollama list`).",
+        );
+    }
+    msg
 }
 
 #[derive(Debug, Clone)]
@@ -73,13 +209,43 @@ pub struct Client {
     vcr: Option<VcrRecorder>,
 }
 
+/// Process-global cache of the built TLS connector.
+///
+/// Building the connector pulls in the root trust store, which is the single
+/// most expensive part of constructing a [`Client`]. `Client::new()` is called
+/// from many hot paths (every provider constructor, the version check, etc.),
+/// so without caching each call rebuilt the trust store from scratch. We now
+/// build the connector once per process and clone it (`TlsConnector` is cheap
+/// to clone) on every subsequent call. See pi_agent_rust#101.
+///
+/// The `Err` variant carries the build error as a `String` so a transient or
+/// configuration failure is still observed identically on every call.
+static TLS_CONNECTOR: std::sync::OnceLock<std::result::Result<TlsConnector, String>> =
+    std::sync::OnceLock::new();
+
+/// Build (or fetch the cached) TLS connector backed by the bundled webpki
+/// root certificates.
+///
+/// Using webpki roots avoids hitting the OS trust store, which on macOS calls
+/// into Security.framework (`SecTrustSettingsCopyTrustSettings`) and can spend
+/// many seconds at high CPU parsing the system cert trust plist on startup.
+/// See pi_agent_rust#101.
+fn shared_tls_connector() -> std::result::Result<TlsConnector, String> {
+    TLS_CONNECTOR
+        .get_or_init(|| {
+            TlsConnectorBuilder::new()
+                .with_webpki_roots()
+                .alpn_protocols(vec![b"http/1.1".to_vec()])
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+}
+
 impl Client {
     #[must_use]
     pub fn new() -> Self {
-        let tls = TlsConnectorBuilder::new()
-            .with_native_roots()
-            .and_then(|builder| builder.alpn_protocols(vec![b"http/1.1".to_vec()]).build())
-            .map_err(|e| e.to_string());
+        let tls = shared_tls_connector();
 
         let user_agent = std::env::var(ANTIGRAVITY_VERSION_ENV).map_or_else(
             |_| DEFAULT_USER_AGENT.to_string(),
@@ -139,7 +305,7 @@ pub struct RequestBuilder<'a> {
     url: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-    timeout: Option<std::time::Duration>,
+    timeout: RequestTimeout,
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -150,7 +316,9 @@ impl<'a> RequestBuilder<'a> {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
-            timeout: default_request_timeout_from_env(),
+            // Resolved at send time so the timeout can be provider-aware
+            // (longer default for local providers like Ollama).
+            timeout: RequestTimeout::Default,
         }
     }
 
@@ -186,7 +354,7 @@ impl<'a> RequestBuilder<'a> {
 
     #[must_use]
     pub const fn timeout(mut self, duration: std::time::Duration) -> Self {
-        self.timeout = Some(duration);
+        self.timeout = RequestTimeout::Explicit(duration);
         self
     }
 
@@ -194,7 +362,7 @@ impl<'a> RequestBuilder<'a> {
     /// an arbitrarily long time (e.g. long-polling SSE streams).
     #[must_use]
     pub const fn no_timeout(mut self) -> Self {
-        self.timeout = None;
+        self.timeout = RequestTimeout::Disabled;
         self
     }
 
@@ -242,8 +410,11 @@ impl<'a> RequestBuilder<'a> {
         }
 
         let send_fut = send_parts(client, method, &url, &headers, &body);
+        let resolved_timeout = resolve_timeout(timeout, &url);
 
-        let (status, response_headers, stream, timeout_info) = if let Some(duration) = timeout {
+        let (status, response_headers, stream, timeout_info) = if let Some(duration) =
+            resolved_timeout
+        {
             use asupersync::time::{sleep, wall_now};
             use futures::future::{Either, FutureExt, select};
 
@@ -257,7 +428,7 @@ impl<'a> RequestBuilder<'a> {
 
             let (status, response_headers, stream) = match select(send_fut, sleep_fut).await {
                 Either::Left((res, _)) => res?,
-                Either::Right(_) => return Err(Error::api("Request timed out")),
+                Either::Right(_) => return Err(Error::api(timeout_error_message(&url, duration))),
             };
             (
                 status,
@@ -525,23 +696,170 @@ impl Response {
     }
 }
 
-async fn connect_transport(parsed: &ParsedUrl, client: &Client) -> Result<Transport> {
+/// Windows Winsock error code for "Socket is not connected" (`WSAENOTCONN`).
+///
+/// Layered Winsock providers (VPN clients, antivirus, firewall LSPs) can
+/// report an outbound TCP connect as complete — `getpeername` succeeds — while
+/// the base provider socket has not actually finished connecting, so the first
+/// send on the socket fails with 10057 (pi_agent_rust#106, previously #66 /
+/// asupersync#35). The upstream asupersync peer_addr readiness probe (0.3.2+)
+/// is not sufficient in those environments, so the connect path retries the
+/// whole connect with a fresh socket.
+const WSAENOTCONN: i32 = 10057;
+
+/// Backoff schedule for retrying a connect that failed with a "socket not
+/// connected" error: three attempts total (initial + one retry per entry).
+const NOT_CONNECTED_RETRY_BACKOFFS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_millis(750),
+];
+
+/// Whether an I/O error means the OS reported the socket as not connected
+/// (`WSAENOTCONN` / os error 10057 on Windows, `ENOTCONN` elsewhere).
+///
+/// During an *outbound* connect / TLS handshake this is never a legitimate
+/// terminal state — we just created the socket ourselves — so it is always
+/// worth retrying with a fresh connection on any platform. Other error kinds
+/// (refused, reset, DNS failures, certificate errors, ...) must NOT be
+/// retried here.
+///
+/// Layered transports sometimes wrap the original socket error in another
+/// error, so the inner errors are inspected too, not just the top-level one.
+/// Two wrapping shapes are walked:
+///   * `io::Error` wrapping another `io::Error` — the inner error is reachable
+///     via [`std::io::Error::get_ref`]. (Note: `io::Error`'s `Error::source`
+///     intentionally returns the *inner's* source, not the inner error itself,
+///     so a `get_ref` walk is required to see a wrapped `io::Error`.)
+///   * a non-`io` error wrapping an `io::Error` — reachable via the generic
+///     [`std::error::Error::source`] chain.
+fn is_retryable_not_connected(err: &std::io::Error) -> bool {
+    fn matches_not_connected(err: &std::io::Error) -> bool {
+        err.kind() == std::io::ErrorKind::NotConnected || err.raw_os_error() == Some(WSAENOTCONN)
+    }
+    // Walk the `io::Error` -> `io::Error` `get_ref` chain.
+    let mut current = Some(err);
+    while let Some(io_err) = current {
+        if matches_not_connected(io_err) {
+            return true;
+        }
+        current = io_err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<std::io::Error>());
+    }
+    // Walk the generic `Error::source` chain for non-`io` wrappers, downcasting
+    // each link back to `io::Error` where possible.
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if matches_not_connected(io_err) {
+                return true;
+            }
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// Whether a TLS connect error is caused by a retryable "socket not
+/// connected" I/O error (see [`is_retryable_not_connected`]).
+///
+/// The common shape is `TlsError::Io(io::Error)`, but a layered Winsock
+/// provider can surface the WSAENOTCONN through the TLS library itself (e.g.
+/// `TlsError::Rustls` / `TlsError::Handshake`), where the originating
+/// `io::Error` is only reachable via the [`std::error::Error::source`] chain.
+/// We therefore check the direct `Io` variant *and* walk the source chain so
+/// the fresh-socket retry fires regardless of which variant the connector
+/// chose to report (pi_agent_rust#111 / #106).
+fn is_retryable_not_connected_tls(err: &TlsError) -> bool {
+    if let TlsError::Io(io_err) = err {
+        if is_retryable_not_connected(io_err) {
+            return true;
+        }
+    }
+    // Walk the generic source chain; any link that is (or wraps) a
+    // "socket not connected" io::Error makes the connect retryable.
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if is_retryable_not_connected(io_err) {
+                return true;
+            }
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// A failed connect attempt: the user-facing error plus whether it is a
+/// retryable "socket not connected" failure (classified on the typed error
+/// *before* it is flattened into a message string).
+struct ConnectAttemptError {
+    error: Error,
+    retryable_not_connected: bool,
+}
+
+/// One full connect attempt: fresh TCP connection plus (for HTTPS) a fresh
+/// TLS handshake. On failure the partially-connected stream is dropped, which
+/// closes the socket.
+async fn connect_transport_once(
+    parsed: &ParsedUrl,
+    client: &Client,
+) -> std::result::Result<Transport, ConnectAttemptError> {
     let addr = (parsed.host.clone(), parsed.port);
-    let tcp = TcpStream::connect(addr).await?;
+    let tcp = TcpStream::connect(addr)
+        .await
+        .map_err(|e| ConnectAttemptError {
+            retryable_not_connected: is_retryable_not_connected(&e),
+            error: Error::from(e),
+        })?;
     match parsed.scheme {
         Scheme::Http => Ok(Transport::Tcp(tcp)),
         Scheme::Https => {
-            let tls = client
-                .tls
-                .as_ref()
-                .map_err(|e| Error::api(format!("TLS configuration error: {e}")))?;
-            let tls_stream = tls
-                .clone()
-                .connect(&parsed.host, tcp)
-                .await
-                .map_err(|e| Error::api(format!("TLS connect failed: {e}")))?;
+            let tls = client.tls.as_ref().map_err(|e| ConnectAttemptError {
+                error: Error::api(format!("TLS configuration error: {e}")),
+                retryable_not_connected: false,
+            })?;
+            let tls_stream =
+                tls.clone()
+                    .connect(&parsed.host, tcp)
+                    .await
+                    .map_err(|e| ConnectAttemptError {
+                        retryable_not_connected: is_retryable_not_connected_tls(&e),
+                        error: Error::api(format!("TLS connect failed: {e}")),
+                    })?;
             Ok(Transport::Tls(Box::new(tls_stream)))
         }
+    }
+}
+
+async fn connect_transport(parsed: &ParsedUrl, client: &Client) -> Result<Transport> {
+    use asupersync::time::{sleep, wall_now};
+
+    let mut backoffs = NOT_CONNECTED_RETRY_BACKOFFS.iter();
+    loop {
+        let failure = match connect_transport_once(parsed, client).await {
+            Ok(transport) => return Ok(transport),
+            Err(failure) => failure,
+        };
+        if !failure.retryable_not_connected {
+            return Err(failure.error);
+        }
+        let Some(&backoff) = backoffs.next() else {
+            return Err(failure.error);
+        };
+        tracing::warn!(
+            host = %parsed.host,
+            error = %failure.error,
+            backoff_ms = backoff.as_millis(),
+            "connect reported socket-not-connected (WSAENOTCONN 10057); \
+             retrying with a fresh connection (pi_agent_rust#106)"
+        );
+        // The failed transport was dropped (socket closed) when the attempt
+        // returned; back off briefly, then redo the full TCP + TLS connect.
+        let now = asupersync::Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or_else(wall_now, |timer| timer.now());
+        sleep(now, backoff).await;
     }
 }
 
@@ -1170,6 +1488,97 @@ mod tests {
         assert_eq!(Method::Post.as_str(), "POST");
     }
 
+    // ── is_retryable_not_connected (#106 / #66 / asupersync#35) ─────────
+    #[test]
+    fn retryable_not_connected_kind() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotConnected, "Socket is not connected");
+        assert!(is_retryable_not_connected(&err));
+    }
+
+    #[test]
+    fn retryable_wsaenotconn_raw_os_error() {
+        // On Windows from_raw_os_error(10057) also maps kind() to
+        // NotConnected; on Unix the kind is uncategorized and only the raw
+        // code matches. Both paths must classify as retryable.
+        let err = std::io::Error::from_raw_os_error(WSAENOTCONN);
+        assert!(is_retryable_not_connected(&err));
+    }
+
+    #[test]
+    fn retryable_not_connected_wrapped_in_source_chain() {
+        // A layered transport may wrap the original socket error in another
+        // io::Error with a different kind; the source chain must be walked.
+        let inner = std::io::Error::from_raw_os_error(WSAENOTCONN);
+        let outer = std::io::Error::other(inner);
+        assert!(is_retryable_not_connected(&outer));
+
+        let inner = std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected");
+        let outer = std::io::Error::new(std::io::ErrorKind::BrokenPipe, inner);
+        assert!(is_retryable_not_connected(&outer));
+    }
+
+    #[test]
+    fn not_retryable_wrapped_other_error() {
+        let inner = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let outer = std::io::Error::other(inner);
+        assert!(!is_retryable_not_connected(&outer));
+    }
+
+    #[test]
+    fn not_retryable_connection_refused() {
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        assert!(!is_retryable_not_connected(&err));
+    }
+
+    #[test]
+    fn not_retryable_generic_io_error() {
+        let err = std::io::Error::other("boom");
+        assert!(!is_retryable_not_connected(&err));
+    }
+
+    #[test]
+    fn retryable_tls_io_not_connected() {
+        let err = TlsError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "Socket is not connected",
+        ));
+        assert!(is_retryable_not_connected_tls(&err));
+    }
+
+    #[test]
+    fn retryable_tls_io_wsaenotconn_raw() {
+        let err = TlsError::Io(std::io::Error::from_raw_os_error(WSAENOTCONN));
+        assert!(is_retryable_not_connected_tls(&err));
+    }
+
+    #[test]
+    fn not_retryable_tls_handshake_failure() {
+        let err = TlsError::Handshake("handshake failure".to_string());
+        assert!(!is_retryable_not_connected_tls(&err));
+    }
+
+    #[test]
+    fn retryable_tls_io_source_chain_wsaenotconn() {
+        // A layered Winsock provider can wrap the originating WSAENOTCONN
+        // io::Error inside another io::Error reported as `TlsError::Io`; the
+        // raw os error is only reachable via the get_ref/source chain
+        // (pi_agent_rust#111). The classifier must still treat it as
+        // retryable.
+        let inner = std::io::Error::from_raw_os_error(WSAENOTCONN);
+        let wrapped = std::io::Error::other(inner);
+        let err = TlsError::Io(wrapped);
+        assert!(is_retryable_not_connected_tls(&err));
+    }
+
+    #[test]
+    fn not_retryable_tls_io_other_kind() {
+        let err = TlsError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(!is_retryable_not_connected_tls(&err));
+    }
+
     // ── find_headers_end ────────────────────────────────────────────────
     #[test]
     fn find_headers_end_present() {
@@ -1766,8 +2175,9 @@ mod tests {
     fn request_builder_default_timeout() {
         let client = Client::new();
         let builder = client.get("https://api.example.com");
-        // During tests, default timeout is disabled to avoid virtual timer issues.
-        assert_eq!(builder.timeout, None);
+        // The default is resolved lazily at send time so it can be
+        // provider-aware (longer for local providers like Ollama).
+        assert_eq!(builder.timeout, RequestTimeout::Default);
     }
 
     #[test]
@@ -1776,14 +2186,51 @@ mod tests {
         let builder = client
             .get("https://api.example.com")
             .timeout(std::time::Duration::from_secs(30));
-        assert_eq!(builder.timeout, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(
+            builder.timeout,
+            RequestTimeout::Explicit(std::time::Duration::from_secs(30))
+        );
     }
 
     #[test]
     fn request_builder_no_timeout() {
         let client = Client::new();
         let builder = client.get("https://api.example.com").no_timeout();
-        assert_eq!(builder.timeout, None);
+        assert_eq!(builder.timeout, RequestTimeout::Disabled);
+    }
+
+    #[test]
+    fn url_is_local_provider_detects_loopback() {
+        assert!(url_is_local_provider("http://127.0.0.1:11434/v1"));
+        assert!(url_is_local_provider("http://localhost:1234/v1"));
+        assert!(url_is_local_provider("http://[::1]:11434/v1"));
+        assert!(url_is_local_provider("http://0.0.0.0:11434/v1"));
+        assert!(!url_is_local_provider("https://api.openai.com/v1"));
+        assert!(!url_is_local_provider("https://api.anthropic.com/v1"));
+        assert!(!url_is_local_provider("not a url"));
+    }
+
+    #[test]
+    fn timeout_error_message_mentions_setting_and_ollama() {
+        let local = timeout_error_message(
+            "http://127.0.0.1:11434/v1",
+            std::time::Duration::from_secs(600),
+        );
+        assert!(local.contains("600s"));
+        assert!(local.contains("PI_HTTP_REQUEST_TIMEOUT_SECS"));
+        assert!(local.contains("--request-timeout"));
+        assert!(local.contains("requestTimeoutSecs"));
+        assert!(local.contains("Ollama"));
+        assert!(local.contains("pull"));
+
+        let remote = timeout_error_message(
+            "https://api.openai.com/v1",
+            std::time::Duration::from_secs(60),
+        );
+        assert!(remote.contains("60s"));
+        assert!(remote.contains("PI_HTTP_REQUEST_TIMEOUT_SECS"));
+        // Cloud providers should not get Ollama-specific guidance.
+        assert!(!remote.contains("Ollama"));
     }
 
     struct MockRetryWriter {
