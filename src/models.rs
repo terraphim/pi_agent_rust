@@ -558,8 +558,16 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
                 description: Some("GLM-5.1".to_string()),
             });
             candidates.push(ModelAutocompleteCandidate {
+                slug: "zai/glm-5.2".to_string(),
+                description: Some("GLM-5.2".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
                 slug: "zhipuai/glm-5.1".to_string(),
                 description: Some("GLM-5.1".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "zhipuai/glm-5.2".to_string(),
+                description: Some("GLM-5.2".to_string()),
             });
             candidates.push(ModelAutocompleteCandidate {
                 slug: "minimax/minimax-m2.7-highspeed".to_string(),
@@ -572,6 +580,10 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
             candidates.push(ModelAutocompleteCandidate {
                 slug: "kimi-for-coding/kimi-k2.6".to_string(),
                 description: Some("Kimi K2.6".to_string()),
+            });
+            candidates.push(ModelAutocompleteCandidate {
+                slug: "kimi-for-coding/kimi-k2.7".to_string(),
+                description: Some("Kimi K2.7".to_string()),
             });
             candidates.sort_by_key(|candidate| candidate.slug.to_ascii_lowercase());
             candidates.dedup_by(|a, b| a.slug.eq_ignore_ascii_case(&b.slug));
@@ -902,10 +914,18 @@ fn model_is_reasoning(model_id: &str) -> Option<bool> {
     }
 
     // Kimi: kimi-k2.5+ are reasoning; kimi-k2 and below are not.
-    if id.starts_with("kimi-k2.5") || id.starts_with("kimi-k2.6") || id.starts_with("kimi-k3") {
+    if id.starts_with("kimi-k2.5")
+        || id.starts_with("kimi-k2.6")
+        || id.starts_with("kimi-k2.7")
+        || id.starts_with("kimi-k3")
+    {
         return Some(true);
     }
-    if id.starts_with("kimi-k2") && !id.starts_with("kimi-k2.5") && !id.starts_with("kimi-k2.6") {
+    if id.starts_with("kimi-k2")
+        && !id.starts_with("kimi-k2.5")
+        && !id.starts_with("kimi-k2.6")
+        && !id.starts_with("kimi-k2.7")
+    {
         return Some(false);
     }
 
@@ -1704,7 +1724,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
         });
     }
 
-    // Zhipu GLM-5.1 (including ZhipuAI and coding-plan variants).
+    // Zhipu GLM-5.1 / GLM-5.2 (including ZhipuAI and coding-plan variants).
     for (provider, base_url) in [
         ("zai", "https://api.z.ai/api/paas/v4"),
         ("zai-coding-plan", "https://api.z.ai/api/coding/paas/v4"),
@@ -1714,49 +1734,56 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             "https://open.bigmodel.cn/api/coding/paas/v4",
         ),
     ] {
-        if !models
-            .iter()
-            .any(|entry| entry.model.provider == provider && entry.model.id == "glm-5.1")
-        {
-            models.push(ModelEntry {
-                model: Model {
-                    id: "glm-5.1".to_string(),
-                    name: "GLM-5.1".to_string(),
-                    api: if mode == ModelRegistryLoadMode::Full {
-                        Api::OpenAICompletions.to_string()
-                    } else {
-                        "openai-completions".to_string()
+        for model_id in ["glm-5.1", "glm-5.2"] {
+            let name = if model_id == "glm-5.1" {
+                "GLM-5.1"
+            } else {
+                "GLM-5.2"
+            };
+            if !models
+                .iter()
+                .any(|entry| entry.model.provider == provider && entry.model.id == model_id)
+            {
+                models.push(ModelEntry {
+                    model: Model {
+                        id: model_id.to_string(),
+                        name: name.to_string(),
+                        api: if mode == ModelRegistryLoadMode::Full {
+                            Api::OpenAICompletions.to_string()
+                        } else {
+                            "openai-completions".to_string()
+                        },
+                        provider: provider.to_string(),
+                        base_url: if mode == ModelRegistryLoadMode::Full {
+                            base_url.to_string()
+                        } else {
+                            String::new()
+                        },
+                        reasoning: true,
+                        input: vec![InputType::Text, InputType::Image],
+                        cost: ModelCost {
+                            input: 0.0,
+                            output: 0.0,
+                            cache_read: 0.0,
+                            cache_write: 0.0,
+                        },
+                        context_window: 262_144,
+                        max_tokens: 32_768,
+                        headers: HashMap::new(),
                     },
-                    provider: provider.to_string(),
-                    base_url: if mode == ModelRegistryLoadMode::Full {
-                        base_url.to_string()
-                    } else {
-                        String::new()
-                    },
-                    reasoning: true,
-                    input: vec![InputType::Text, InputType::Image],
-                    cost: ModelCost {
-                        input: 0.0,
-                        output: 0.0,
-                        cache_read: 0.0,
-                        cache_write: 0.0,
-                    },
-                    context_window: 262_144,
-                    max_tokens: 32_768,
+                    api_key: resolve_provider_api_key_cached(
+                        auth,
+                        provider,
+                        provider,
+                        &mut canonical_api_key_cache,
+                        &mut provider_api_key_cache,
+                    ),
                     headers: HashMap::new(),
-                },
-                api_key: resolve_provider_api_key_cached(
-                    auth,
-                    provider,
-                    provider,
-                    &mut canonical_api_key_cache,
-                    &mut provider_api_key_cache,
-                ),
-                headers: HashMap::new(),
-                auth_header: true,
-                compat: None,
-                oauth_config: None,
-            });
+                    auth_header: true,
+                    compat: None,
+                    oauth_config: None,
+                });
+            }
         }
     }
 
@@ -1821,8 +1848,13 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
         }
     }
 
-    // Kimi for Coding K2.5 and K2.6.
-    for model_id in ["kimi-k2.5", "kimi-k2.6"] {
+    // Kimi for Coding K2.5, K2.6 and K2.7.
+    for model_id in ["kimi-k2.5", "kimi-k2.6", "kimi-k2.7"] {
+        let name = match model_id {
+            "kimi-k2.5" => "Kimi K2.5",
+            "kimi-k2.6" => "Kimi K2.6",
+            _ => "Kimi K2.7",
+        };
         if !models
             .iter()
             .any(|entry| entry.model.provider == "kimi-for-coding" && entry.model.id == model_id)
@@ -1830,11 +1862,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             models.push(ModelEntry {
                 model: Model {
                     id: model_id.to_string(),
-                    name: if model_id == "kimi-k2.5" {
-                        "Kimi K2.5".to_string()
-                    } else {
-                        "Kimi K2.6".to_string()
-                    },
+                    name: name.to_string(),
                     api: if mode == ModelRegistryLoadMode::Full {
                         Api::AnthropicMessages.to_string()
                     } else {
@@ -2593,7 +2621,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let built = built_in_models(&auth, ModelRegistryLoadMode::Full);
 
-        // GLM-5.1 seeds
+        // GLM-5.1 / GLM-5.2 seeds
         assert!(
             built
                 .iter()
@@ -2603,8 +2631,20 @@ mod tests {
         assert!(
             built
                 .iter()
+                .any(|m| m.model.provider == "zai" && m.model.id == "glm-5.2"),
+            "zai/glm-5.2 should be in built-ins"
+        );
+        assert!(
+            built
+                .iter()
                 .any(|m| m.model.provider == "zai-coding-plan" && m.model.id == "glm-5.1"),
             "zai-coding-plan/glm-5.1 should be in built-ins"
+        );
+        assert!(
+            built
+                .iter()
+                .any(|m| m.model.provider == "zai-coding-plan" && m.model.id == "glm-5.2"),
+            "zai-coding-plan/glm-5.2 should be in built-ins"
         );
 
         // MiniMax M2.7 HighSpeed seeds
@@ -2622,7 +2662,7 @@ mod tests {
             "minimax-coding-plan/minimax-m2.7-highspeed should be in built-ins"
         );
 
-        // Kimi K2.5 / K2.6 seeds
+        // Kimi K2.5 / K2.6 / K2.7 seeds
         assert!(
             built
                 .iter()
@@ -2634,6 +2674,12 @@ mod tests {
                 .iter()
                 .any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.6"),
             "kimi-for-coding/kimi-k2.6 should be in built-ins"
+        );
+        assert!(
+            built
+                .iter()
+                .any(|m| m.model.provider == "kimi-for-coding" && m.model.id == "kimi-k2.7"),
+            "kimi-for-coding/kimi-k2.7 should be in built-ins"
         );
     }
 
