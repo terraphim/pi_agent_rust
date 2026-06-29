@@ -6,4 +6,4 @@ Precise-edit tool using `LINE#HASH` anchors emitted by `read`/`grep` with `hashl
 
 Related: tool
 
-synonyms:: hashline_edit, hashline, line hash, hash line, precise edit, line hash edit, hash anchor, LINE#HASH, hashline edit tool
+synonyms:: hashline_edit, hashline, line hash, hash line, precise edit, line hash edit, hash anchor, LINE#HASH, hashline edit tool, HashlineEditTool

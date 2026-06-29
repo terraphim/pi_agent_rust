@@ -6,4 +6,4 @@ Agent Client Protocol support. `pi --acp` runs pi as an ACP server (stdin JSON-R
 
 Related: interactive-tui, session, rpc
 
-synonyms:: acp, agent client protocol, --acp, acp server, acp session, set_model, set_config_option, session-dir, json-rpc server, rpc mode, stdin mode, rpc
+synonyms:: acp, agent client protocol, --acp, acp server, acp session, set_model, set_config_option, session-dir, json-rpc server, rpc mode, stdin mode, rpc, AcpOptions
