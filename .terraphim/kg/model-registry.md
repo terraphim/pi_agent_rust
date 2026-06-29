@@ -6,4 +6,4 @@ Model resolution layer (`src/models.rs`, `src/app.rs`). Resolves `ModelEntry` re
 
 Related: provider, interactive-tui, auth
 
-synonyms:: model registry, modelregistry, model entry, modelentry, models.json, model catalog, built-in models, provider default models, model resolution, autocomplete, reasoning effort, thinking control, default model, model id, model fetch, kimi-k2.7, glm-5.2
+synonyms:: model registry, modelregistry, model entry, modelentry, models.json, model catalog, built-in models, provider default models, model resolution, autocomplete, reasoning effort, thinking control, default model, model id, model fetch, kimi-k2.7, glm-5.2, RpcModelInfo, RpcCycleModelResult, ModelKey, ModelSelectorOverlay, RpcScopedModel, ScopedModel, ModelSelection, Model, ModelCost, ModelRoutingEvidence, ModelsConfig, ModelConfig, ModelAutocompleteCandidate, ModelChangeEntry, RuntimeRiskBaselineModel

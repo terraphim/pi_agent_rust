@@ -6,4 +6,4 @@ Interactive terminal front-end (`src/interactive.rs`, `src/tui.rs`) built on the
 
 Related: rpc, acp, model-registry
 
-synonyms:: interactive, tui, interactive tui, terminal ui, bubbletea, charmed_rust, lipgloss, glamour, slash command, /login, /model, /mcp, mouse capture, pi no mouse capture, frontend
+synonyms:: interactive, tui, interactive tui, terminal ui, bubbletea, charmed_rust, lipgloss, glamour, slash command, /login, /model, /mcp, mouse capture, pi no mouse capture, frontend, TreeSelectorRow, TreeSelectorState, PiApp, SessionPickerOverlay, ThemePickerOverlay, BranchPickerOverlay, ThemePickerItem

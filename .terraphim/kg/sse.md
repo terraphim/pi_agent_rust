@@ -6,4 +6,4 @@ Server-Sent Events parser for streaming LLM responses (`src/sse.rs`). Parses the
 
 Related: provider, model-registry
 
-synonyms:: sse, server-sent events, sse parser, streaming, stream parser, event stream, delta, streaming response, provider streaming, provider_streaming, model fetch
+synonyms:: sse, server-sent events, sse parser, streaming, stream parser, event stream, delta, streaming response, provider streaming, provider_streaming, model fetch, SseEvent, SseParser, StreamEvent

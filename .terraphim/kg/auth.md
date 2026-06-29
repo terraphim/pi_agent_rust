@@ -6,4 +6,4 @@ Credential storage and OAuth flows (`src/auth.rs`). `auth.json` (perms 600) at `
 
 Related: provider, interactive-tui
 
-synonyms:: auth, authentication, oauth, auth.json, login, /login, credentials, oauth token, token expired, api key, openai-codex login, kimi oauth, copilot login, auth storage, re-login
+synonyms:: auth, authentication, oauth, auth.json, login, /login, credentials, oauth token, token expired, api key, openai-codex login, kimi oauth, copilot login, auth storage, re-login, PendingOAuth, OAuthConfig, AuthDiagnostic, AuthFile, AuthStorage, OAuthStartInfo, OAuthCallbackServer, CopilotOAuthConfig, GitLabOAuthConfig, AuthCredential, AuthDiagnosticCode

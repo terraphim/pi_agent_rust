@@ -6,4 +6,4 @@ Built-in agent tools (`src/tools.rs`) invoked by the agent loop (`src/agent.rs`)
 
 Related: extension, hashline-edit, agent loop
 
-synonyms:: tool, tools, built-in tool, read tool, write tool, edit tool, bash tool, grep tool, find tool, ls tool, hashline_edit, agent tool, tool registry, tool call, tool definition
+synonyms:: tool, tools, built-in tool, read tool, write tool, edit tool, bash tool, grep tool, find tool, ls tool, hashline_edit, agent tool, tool registry, tool call, tool definition, GeminiTool, ToolRegistry, ReadTool, BashTool, EditTool, WriteTool, GrepTool, FindTool, LsTool, HashlineEditTool

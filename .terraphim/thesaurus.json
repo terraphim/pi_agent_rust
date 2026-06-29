@@ -49,6 +49,10 @@
       "id": 100,
       "nterm": "acp"
     },
+    "acpoptions": {
+      "id": 100,
+      "nterm": "acp"
+    },
     "asupersync": {
       "id": 101,
       "nterm": "asupersync"
@@ -157,6 +161,50 @@
       "id": 102,
       "nterm": "auth"
     },
+    "pendingoauth": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "oauthconfig": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "authdiagnostic": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "authfile": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "authstorage": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "oauthstartinfo": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "oauthcallbackserver": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "copilotoauthconfig": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "gitlaboauthconfig": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "authcredential": {
+      "id": 102,
+      "nterm": "auth"
+    },
+    "authdiagnosticcode": {
+      "id": 102,
+      "nterm": "auth"
+    },
     "conformance": {
       "id": 103,
       "nterm": "conformance"
@@ -257,6 +305,450 @@
       "id": 104,
       "nterm": "extension"
     },
+    "extensiontrusttracker": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensioncliflag": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallrewriteplan": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallrewritedecision": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallrewriteengine": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionindex": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionindexentry": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionsearchhit": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionsafetyprovenance": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionindexrefreshstats": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionindexstore": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionresourcepaths": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallrequest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensiontooldef": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionrepairevent": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityproofreport": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilitypromptoverlay": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensioncustomoverlay": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensiontoolwrapper": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallsuperinstructionplan": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallsuperinstructioncompiler": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallsuperinstructionselection": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallsuperinstructionexecution": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallqueuetelemetry": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallepochpin": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpolicyconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionriskconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionconformanceresult": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionregression": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "compatcapabilityevidence": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionoverride": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpolicy": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionquotaconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionbudgetcontrollerconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "baselinecapabilityprofile": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "runtimehostcallsequencecontext": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "runtimehostcallfeaturevector": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "runtimehostcalltelemetryevent": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "runtimehostcalltelemetryartifact": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicydiffconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicysamplesupport": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicytelemetrymetrics": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicylatencyeffect": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicylanechange": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicyactionchange": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicythresholdchange": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicyrollbackcondition": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicydiffreport": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityexplanation": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionmessage": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilitymanifest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityrequirement": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityscope": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityprovenance": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityintegrityattestation": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilitypublisherattestation": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactorconfig": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactorrequest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactorcompletion": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactorbackpressure": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactortelemetry": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallreactormesh": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionuirequest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionuiresponse": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionsendmessage": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionsendusermessage": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionaicompletionrequest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionmanifest": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionmanifestsource": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissionsnapshot": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissiondriftreport": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionmanager": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionmanagerhandle": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionregion": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionindexsource": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcalloutcome": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensiontruststate": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionevent": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionshape": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallrewriteplankind": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensioncategory": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallqueuemode": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallqueueenqueueresult": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilityaction": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallkind": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilitydelta": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capabilitymonotonicityverdict": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallcategory": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcalldelta": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcalldispatchlane": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcalliohint": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcallcapabilityclass": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "hostcapability": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "capability": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpolicymode": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionbudgettier": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "adaptivehostcallpolicydiffverdict": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionbody": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "commonhostcallopcode": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensiondeliveras": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensioneventname": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionruntime": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissiontrust": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissiondriftclass": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissionrisklevel": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissionprovenancestatus": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionpermissiondriftverdict": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionloadspec": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionruntimehandle": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionruntimeengineselection": {
+      "id": 104,
+      "nterm": "extension"
+    },
+    "extensionstreamsimpleprovider": {
+      "id": 104,
+      "nterm": "extension"
+    },
     "hashline-edit": {
       "id": 105,
       "nterm": "hashline-edit"
@@ -294,6 +786,10 @@
       "nterm": "hashline-edit"
     },
     "hashline edit tool": {
+      "id": 105,
+      "nterm": "hashline-edit"
+    },
+    "hashlineedittool": {
       "id": 105,
       "nterm": "hashline-edit"
     },
@@ -354,6 +850,34 @@
       "nterm": "interactive-tui"
     },
     "frontend": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "treeselectorrow": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "treeselectorstate": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "piapp": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "sessionpickeroverlay": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "themepickeroverlay": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "branchpickeroverlay": {
+      "id": 106,
+      "nterm": "interactive-tui"
+    },
+    "themepickeritem": {
       "id": 106,
       "nterm": "interactive-tui"
     },
@@ -426,6 +950,66 @@
       "nterm": "model-registry"
     },
     "glm-5.2": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "rpcmodelinfo": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "rpccyclemodelresult": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelkey": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelselectoroverlay": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "rpcscopedmodel": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "scopedmodel": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelselection": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "model": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelcost": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelroutingevidence": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelsconfig": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelconfig": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelautocompletecandidate": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "modelchangeentry": {
+      "id": 107,
+      "nterm": "model-registry"
+    },
+    "runtimeriskbaselinemodel": {
       "id": 107,
       "nterm": "model-registry"
     },
@@ -573,6 +1157,134 @@
       "id": 109,
       "nterm": "provider"
     },
+    "vertexprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "copilotprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "azureopenaiprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "anthropicprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "openairesponsesprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "openaiprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "autocompleteprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "geminiprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "gitlabprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "cohereprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "bedrockprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "knownprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "toolcallingprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "dummyprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "noopprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "idlecommandprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "tooluseprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "piaicaptureprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "hangingprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "countingprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "phasedprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "toolcallprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "singleshotprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "streamsetuperrorprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "toolturnprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "silentprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "deltaonlyprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "capturingprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "continueprobeprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "flakyprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "alwayserrorprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
+    "rpcdeadlineprobeprovider": {
+      "id": 109,
+      "nterm": "provider"
+    },
     "session": {
       "id": 110,
       "nterm": "session"
@@ -625,6 +1337,162 @@
       "id": 110,
       "nterm": "session"
     },
+    "sessionmeta": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionindexrefreshsummary": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionindex": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionmetrics": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionbeforecompactoutcome": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionbeforecompactcompaction": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionoptions": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "agentsessionhandle": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "agentsessionstate": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "rpcsessionstate": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "rpcsessionstats": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "interactiveextensionsession": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionpicker": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionopendiagnostics": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionopenskippedentry": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionopenorphanedparentlink": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstarttracebundle": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartstoragetrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartinputtrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartphasetrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartindexrefreshtrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartopendiagnosticstrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionreplayminimizationtrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartcompactiontrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartfirstrendertrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioncoldstartboundstrace": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionheader": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessioninfoentry": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sqlitesessionmeta": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionstorev2": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "agentsession": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "tooloutputartifactsessionguard": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionpromptresult": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessiontransportevent": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessiontransportstate": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessiontransport": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionstorekind": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionentry": {
+      "id": 110,
+      "nterm": "session"
+    },
+    "sessionmessage": {
+      "id": 110,
+      "nterm": "session"
+    },
     "sse": {
       "id": 111,
       "nterm": "sse"
@@ -662,6 +1530,18 @@
       "nterm": "sse"
     },
     "provider_streaming": {
+      "id": 111,
+      "nterm": "sse"
+    },
+    "sseevent": {
+      "id": 111,
+      "nterm": "sse"
+    },
+    "sseparser": {
+      "id": 111,
+      "nterm": "sse"
+    },
+    "streamevent": {
       "id": 111,
       "nterm": "sse"
     },
@@ -718,6 +1598,42 @@
       "nterm": "tool"
     },
     "tool definition": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "geminitool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "toolregistry": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "readtool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "bashtool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "edittool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "writetool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "greptool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "findtool": {
+      "id": 112,
+      "nterm": "tool"
+    },
+    "lstool": {
       "id": 112,
       "nterm": "tool"
     }
