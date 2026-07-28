@@ -28,16 +28,15 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
-## Git Branch: ONLY Use `main`, NEVER `master`
+## Git Branch: `main` is the only branch
 
-**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+**The default and sole long-lived branch is `main`.** The legacy `master` branch
+was deleted on 2026-06-28 — its unique commits were preserved on the
+`task/new-model-support-v2` feature branch before deletion.
 
 - **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
-- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
-- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
-  ```bash
-  git push origin main:master
-  ```
+- **Never reference `master` in code or docs** — the branch no longer exists; if you see `master` anywhere, it's a bug that needs fixing
+- Do not recreate `master` or push to it
 
 ---
 
