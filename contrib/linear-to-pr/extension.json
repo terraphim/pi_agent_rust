@@ -1,0 +1,49 @@
+{
+  "schema": "pi.ext.manifest.v1",
+  "extension_id": "pi.linear-to-pr",
+  "name": "linear-to-pr",
+  "version": "0.1.0",
+  "api_version": "v1",
+  "runtime": "js",
+  "entrypoint": "index.js",
+  "description": "Convert a Linear issue into a Git branch and pull request.",
+  "capabilities": ["exec", "http", "env"],
+  "capability_manifest": {
+    "schema": "pi.ext.cap.v2",
+    "capabilities": [
+      {
+        "capability": "http",
+        "intents": ["network_egress"],
+        "connector_classes": ["http"],
+        "hostcall_classes": ["http"],
+        "risk_tier": "medium",
+        "scope": {
+          "hosts": ["api.linear.app"]
+        }
+      },
+      {
+        "capability": "exec",
+        "intents": ["process_exec"],
+        "connector_classes": ["exec"],
+        "hostcall_classes": ["exec"],
+        "risk_tier": "critical"
+      },
+      {
+        "capability": "env",
+        "intents": ["environment_access"],
+        "connector_classes": ["env"],
+        "hostcall_classes": ["env"],
+        "risk_tier": "high",
+        "scope": {
+          "env": [
+            "LINEAR_API_TOKEN",
+            "GITHUB_TOKEN",
+            "GITEA_TOKEN",
+            "GITEA_URL",
+            "PI_LINEAR_TO_PR_PROVIDER"
+          ]
+        }
+      }
+    ]
+  }
+}

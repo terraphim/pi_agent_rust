@@ -553,7 +553,7 @@ pub enum SessionStoreKind {
 }
 
 impl SessionStoreKind {
-    fn from_config(config: &Config) -> Self {
+    pub(crate) fn from_config(config: &Config) -> Self {
         let Some(value) = config.session_store.as_deref() else {
             return Self::Jsonl;
         };
@@ -1318,6 +1318,10 @@ impl Session {
     ) -> Result<Self> {
         let is_interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
         let mut picker_input_override = picker_input_override;
+        // The interactive session picker is part of the TUI front-end. Without
+        // the `tui` feature there is no terminal picker, so library consumers
+        // fall through to the non-interactive resolution path below.
+        #[cfg(feature = "tui")]
         if picker_input_override.is_none() && is_interactive {
             if let Some(session) = crate::session_picker::pick_session(override_dir).await {
                 return Ok(session);
