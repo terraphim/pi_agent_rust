@@ -2288,8 +2288,28 @@ fn model_catalog_error_body_is_credential_free(
 /// defaults.  Returns `None` for endpoints whose `base_url` does not look
 /// like an OpenAI-compatible root (e.g. Anthropic's `…/v1/messages` or
 /// Google's `/v1beta` Gemini endpoint, which need bespoke handlers).
+///
+/// Accepted `api` strings:
+/// - `openai-completions` -- standard OpenAI chat-completions providers
+///   (Groq, OpenRouter, Together, Mistral, etc.). Base URL root of
+///   `https://host/v1` (or `…/chat/completions`) resolves to
+///   `https://host/v1/models`.
+/// - `openai-responses` -- the OpenAI Responses API provider (regular
+///   `api.openai.com/v1`). Same URL shape as above.
+/// - `openai-codex-responses` -- the ChatGPT Codex backend
+///   (`chatgpt.com/backend-api/codex`). Base URL root
+///   `…/backend-api/codex` (or `…/backend-api/codex/responses`) resolves
+///   to `…/backend-api/codex/models`.
+///
+/// All three share the OpenAI `{"data":[{"id":"..."}, ...]}` JSON shape;
+/// `parse_openai_model_ids` reads it uniformly.
 fn openai_compat_models_url(base_url: &str, api: &str) -> Option<String> {
-    if base_url.trim().is_empty() || !matches!(api, "openai-completions" | "openai-responses") {
+    if base_url.trim().is_empty()
+        || !matches!(
+            api,
+            "openai-completions" | "openai-responses" | "openai-codex-responses"
+        )
+    {
         return None;
     }
     let mut explicit = url::Url::parse(base_url.trim()).ok()?;
@@ -2310,6 +2330,21 @@ fn openai_compat_models_url(base_url: &str, api: &str) -> Option<String> {
     if explicit.path().trim_end_matches('/').ends_with("/models") {
         let path = explicit.path().trim_end_matches('/').to_string();
         explicit.set_path(&path);
+        return Some(explicit.to_string());
+    }
+
+    // Codex (`openai-codex-responses`) lives at `…/backend-api/codex`, with the
+    // call root optionally carrying a trailing `/responses`. Strip either
+    // suffix directly so we end up at the `codex` root, then append `/models`.
+    // Using `normalize_openai_base` would be wrong here -- that helper is for
+    // chat-completions APIs and always appends `chat/completions`, which is
+    // not the suffix codex uses.
+    if api == "openai-codex-responses" {
+        let request_path = explicit.path().trim_end_matches('/');
+        let root = request_path
+            .strip_suffix("/responses")
+            .unwrap_or(request_path);
+        explicit.set_path(&format!("{root}/models"));
         return Some(explicit.to_string());
     }
 
@@ -2564,6 +2599,33 @@ mod tests {
         let url = openai_compat_models_url(defaults.base_url, defaults.api)
             .expect("openrouter is openai-compatible");
         assert_eq!(url, "https://openrouter.ai/api/v1/models");
+    }
+
+    /// Codex lives on the ChatGPT backend at `chatgpt.com/backend-api/codex`,
+    /// not on `api.openai.com`. Its `api` is `openai-codex-responses` (the
+    /// native adapter used by `OpenAIResponsesProvider::codex_mode`), and
+    /// its discovery URL is `…/backend-api/codex/models`. Issue #3.
+    #[test]
+    fn openai_compat_url_for_openai_codex() {
+        let defaults = provider_routing_defaults("openai-codex").expect("codex defaults");
+        assert_eq!(defaults.api, "openai-codex-responses");
+        let url = openai_compat_models_url(defaults.base_url, defaults.api)
+            .expect("codex is openai-compatible");
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/models");
+    }
+
+    /// If a user configures codex with the `/responses` suffix already on
+    /// the base URL, the URL builder must still produce `…/models` (not
+    /// `…/responses/models`). Mirrors the existing `…/chat/completions`
+    /// suffix-stripping for the standard providers.
+    #[test]
+    fn openai_compat_url_for_openai_codex_strips_responses_suffix() {
+        let url = openai_compat_models_url(
+            "https://chatgpt.com/backend-api/codex/responses",
+            "openai-codex-responses",
+        )
+        .expect("codex /responses suffix must be stripped");
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/models");
     }
 
     #[test]

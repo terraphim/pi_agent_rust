@@ -99,7 +99,25 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
         aliases: &["codex", "chatgpt-codex"],
         auth_env_keys: &[],
         onboarding: ProviderOnboardingMode::NativeAdapterRequired,
-        routing_defaults: None,
+        // Routing defaults enable live `GET /v1/models` discovery via
+        // `src/providers/model_fetch.rs`. The base URL points at the
+        // `backend-api/codex` root, the api string matches the provider's
+        // native adapter (`Api::OpenAICodexResponses`), and the context/
+        // max-token limits mirror the hand-rolled ModelEntry defaults in
+        // `src/models.rs:2853-3060` so a fallback catalog matches the
+        // built-in shape. Auth is via OAuth bearer (not API key), threaded
+        // through `effective_model_catalog_api_key` like any other
+        // provider; the cache fingerprint already covers credential
+        // rotation.
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-codex-responses",
+            base_url: "https://chatgpt.com/backend-api/codex",
+            auth_header: true,
+            reasoning: true,
+            input: &INPUT_TEXT_IMAGE,
+            context_window: 272_000,
+            max_tokens: 128_000,
+        }),
         test_obligations: TEST_REQUIRED,
     },
     ProviderMetadata {
@@ -2141,6 +2159,22 @@ mod tests {
         assert!(provider_routing_defaults("azure-openai").is_none());
     }
 
+    /// The codex backend exposes a live `GET /v1/models` endpoint, so the
+    /// provider's routing defaults are populated to enable `model_fetch.rs`
+    /// discovery (issue #3). The base URL points at the `backend-api/codex`
+    /// root, the api string matches the native adapter, and auth is OAuth
+    /// bearer.
+    #[test]
+    fn provider_routing_defaults_present_for_openai_codex_native_adapter() {
+        let defaults = provider_routing_defaults("openai-codex").expect("codex defaults");
+        assert_eq!(defaults.api, "openai-codex-responses");
+        assert_eq!(defaults.base_url, "https://chatgpt.com/backend-api/codex");
+        assert!(defaults.auth_header);
+        assert!(defaults.reasoning);
+        assert_eq!(defaults.context_window, 272_000);
+        assert_eq!(defaults.max_tokens, 128_000);
+    }
+
     #[test]
     fn provider_routing_defaults_present_for_bedrock_native_adapter() {
         let defaults = provider_routing_defaults("amazon-bedrock").expect("bedrock defaults");
@@ -3471,6 +3505,17 @@ mod tests {
             "openai-responses",
             "anthropic-messages",
         ];
+        // Native adapters may carry routing defaults for two reasons:
+        //   1. To declare their `api` family (base_url is empty). Bedrock
+        //      and sap-ai-core are the canonical cases.
+        //   2. To enable live model discovery via `model_fetch.rs`. The
+        //      base_url is non-empty but the api must be one of the
+        //      transports `model_fetch::openai_compat_models_url` accepts,
+        //      and the provider must NOT advertise a plain API-key
+        //      env-var path (so it cannot be mistaken for a zero-config
+        //      preset). Codex is the canonical case (issue #3): OAuth
+        //      bearer, native adapter, live `/v1/models` discovery.
+        const MODEL_FETCH_NATIVE_APIS: [&str; 1] = ["openai-codex-responses"];
         for meta in PROVIDER_METADATA {
             match meta.onboarding {
                 ProviderOnboardingMode::OpenAICompatiblePreset => {
@@ -3499,18 +3544,17 @@ mod tests {
                     }
                 }
                 ProviderOnboardingMode::NativeAdapterRequired => {
-                    // Native adapters (bedrock, sap-ai-core, …) legitimately
-                    // carry routing defaults to declare their api family; they
-                    // may NOT carry a routable preset base_url (that would be
-                    // masquerading as a zero-config preset).
-                    let masquerades = meta
-                        .routing_defaults
-                        .is_some_and(|defaults| !defaults.base_url.is_empty());
-                    assert!(
-                        !masquerades,
-                        "native-adapter provider '{}' must not masquerade as a routable preset",
-                        meta.canonical_id
-                    );
+                    if let Some(defaults) = meta.routing_defaults {
+                        let masquerades = !defaults.base_url.is_empty()
+                            && !MODEL_FETCH_NATIVE_APIS.contains(&defaults.api);
+                        assert!(
+                            !masquerades,
+                            "native-adapter provider '{}' must not masquerade as a routable preset (api '{}', base_url {:?})",
+                            meta.canonical_id,
+                            defaults.api,
+                            defaults.base_url
+                        );
+                    }
                 }
                 ProviderOnboardingMode::BuiltInNative => {}
             }
