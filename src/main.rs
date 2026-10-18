@@ -9416,8 +9416,6 @@ async fn run_print_mode(
 
     Ok(())
 }
-    Ok(())
-}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct PrintTextStreamState {
