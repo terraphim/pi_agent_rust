@@ -8,7 +8,7 @@ mod common;
 
 #[cfg(unix)]
 use asupersync::runtime::RuntimeBuilder;
-use common::TestHarness;
+use common::{MockHttpResponse, MockHttpServer, TestHarness};
 use pi::config::Config;
 #[cfg(unix)]
 use pi::extensions::{ExtensionManager, JsExtensionLoadSpec, JsExtensionRuntimeHandle};
@@ -18,25 +18,32 @@ use pi::extensions_js::PiJsRuntimeConfig;
 use pi::package_manager::{PackageManager, PackageScope, ResolveRoots};
 use pi::session::encode_cwd;
 use pi::tools::ToolRegistry;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, Read as _, Write as _};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_CLI_TIMEOUT_SECS: u64 = 120;
+const VCR_CLAUDE_SONNET_MAX_TOKENS: u32 = 64_000;
+// A `#!/bin/sh` stub written to disk and marked executable, so its only writer
+// is Unix-gated.
+#[cfg(unix)]
 const FAKE_NPM_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 
 cmd="${1:-}"
+if [ -n "${PI_E2E_FAKE_NPM_LEDGER:-}" ]; then
+    printf '%s\n' "$*" >> "$PI_E2E_FAKE_NPM_LEDGER"
+fi
+
 if [ "$cmd" = "root" ] && [ "${2:-}" = "-g" ]; then
     printf '%s\n' "${npm_config_prefix:-$PWD/.fake-npm-global}/lib/node_modules"
     exit 0
@@ -272,8 +279,17 @@ impl CliTestHarness {
             )
     }
 
-    #[allow(clippy::too_many_lines)]
     fn run_with_stdin(&self, args: &[&str], stdin: Option<&[u8]>) -> CliResult {
+        self.run_with_stdout_observer(args, stdin, |_| {})
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_with_stdout_observer(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        mut on_line: impl FnMut(&[u8]) + Send + 'static,
+    ) -> CliResult {
         self.harness
             .log()
             .info("action", format!("Running CLI: {}", args.join(" ")));
@@ -310,11 +326,23 @@ impl CliTestHarness {
         let mut child = command.spawn().expect("run pi");
         let child_pid = child.id();
 
-        let mut child_stdout = child.stdout.take().expect("child stdout piped");
+        let child_stdout = child.stdout.take().expect("child stdout piped");
         let mut child_stderr = child.stderr.take().expect("child stderr piped");
         let stdout_handle = std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = child_stdout.read_to_end(&mut buf);
+            let mut reader = std::io::BufReader::new(child_stdout);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let result = reader.read_until(b'\n', &mut line);
+                buf.extend_from_slice(&line);
+                if !line.is_empty() {
+                    on_line(&line);
+                }
+                if !matches!(result, Ok(length) if length > 0) {
+                    break;
+                }
+            }
             buf
         });
         let stderr_handle = std::thread::spawn(move || {
@@ -323,10 +351,10 @@ impl CliTestHarness {
             buf
         });
 
-        if let Some(input) = stdin {
-            if let Some(mut child_stdin) = child.stdin.take() {
-                child_stdin.write_all(input).expect("write stdin");
-            }
+        if let Some(input) = stdin
+            && let Some(mut child_stdin) = child.stdin.take()
+        {
+            child_stdin.write_all(input).expect("write stdin");
         }
         let timeout = Self::cli_timeout();
         let mut timed_out = false;
@@ -399,6 +427,32 @@ impl CliTestHarness {
 fn canon(p: &Path) -> PathBuf {
     let c = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     pi::extensions::strip_unc_prefix(c)
+}
+
+/// Filesystem permission denials cannot be observed by root (DAC bypass), so
+/// tests whose premise is "the process cannot read/write this path" skip
+/// under euid 0 instead of asserting a denial the kernel never produces.
+/// Remote gate workers run as root.
+///
+/// Both callers are themselves `cfg(unix)`, because a POSIX mode is the whole
+/// premise of each. Keep it that way: a non-Unix arm here would be dead code,
+/// and a caller that is not gated is a sign the skip has been copied somewhere
+/// it does not belong.
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+#[cfg(unix)]
+fn deny_auth_fixture_reads(agent_dir: &Path) -> PathBuf {
+    let auth_path = agent_dir.join("auth.json");
+    fs::write(&auth_path, [0xff]).expect("write invalid UTF-8 auth fixture");
+    let mut permissions = fs::metadata(&auth_path)
+        .expect("stat auth fixture")
+        .permissions();
+    permissions.set_mode(0o000);
+    fs::set_permissions(&auth_path, permissions).expect("deny auth fixture reads");
+    auth_path
 }
 
 fn assert_contains(harness: &TestHarness, haystack: &str, needle: &str) {
@@ -505,6 +559,7 @@ fn resolve_roots_for_cli_harness(harness: &CliTestHarness) -> ResolveRoots {
 
     ResolveRoots {
         project_settings_enabled: true,
+        home_dir: Some(PathBuf::from(&harness.env["HOME"])),
         global_settings_path: harness.global_settings_path(),
         project_settings_path: harness.project_settings_path(),
         global_base_dir,
@@ -1120,6 +1175,848 @@ fn e2e_cli_extension_compat_ledger_keeps_cli_extensions_with_no_extensions() {
 }
 
 #[test]
+fn e2e_cli_fetch_models_is_a_standalone_stdout_command() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_is_a_standalone_stdout_command");
+    let result = harness.run(&["--fetch-models", "openai"]);
+
+    assert_exit_code(&harness.harness, &result, 0);
+    assert!(
+        result.stdout.lines().any(|line| !line.trim().is_empty()),
+        "fetch-models should print model IDs to stdout"
+    );
+    assert!(
+        result
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| !line.chars().any(char::is_whitespace)),
+        "stdout must contain one machine-friendly model ID per line: {}",
+        result.stdout
+    );
+    assert!(
+        !result.stdout.contains("\u{1b}[?1049") && !result.stderr.contains("\u{1b}[?1049"),
+        "fetch-models must never enter the alternate-screen TUI"
+    );
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        "showing the static registry instead",
+    );
+    let sessions_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_SESSIONS_DIR")
+            .expect("isolated sessions dir"),
+    );
+    assert!(
+        !sessions_dir.exists(),
+        "standalone model discovery must not initialize a TUI session"
+    );
+}
+
+/// Drain one HTTP request's headers off a catalog fixture socket, patiently.
+///
+/// The three catalog fixtures below each had their own copy of this loop with a
+/// 5s read timeout and `.expect()` on the read (bd-eg6ng). macOS reports an
+/// expired read timeout as EAGAIN/`WouldBlock`, so on a loaded host "the CLI
+/// has not been scheduled yet" failed the test — and because the fixture thread
+/// then died without answering, the CLI saw a connection error and the failure
+/// pointed at the catalog fetch rather than at the clock.
+///
+/// The socket timeout is now a polling interval; the patience budget is the
+/// wall deadline, which only fires when the request really never arrives.
+fn read_catalog_request_headers(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("bound catalog request poll");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut chunk) {
+            Ok(0) => panic!("catalog request ended before its headers"),
+            Ok(count) => request.extend_from_slice(&chunk[..count]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "catalog fixture waited 30s for request headers and got {} bytes",
+                    request.len()
+                );
+            }
+            Err(error) => panic!("read catalog request: {error}"),
+        }
+    }
+    request
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_acp_launch_options_reach_the_actual_stdio_session() {
+    use std::io::BufRead as _;
+
+    let mut harness = CliTestHarness::new("e2e_acp_launch_options_reach_the_actual_stdio_session");
+    harness.env.remove("PI_CONFIG_PATH");
+    let home = PathBuf::from(&harness.env["HOME"]);
+    harness
+        .env
+        .insert("USERPROFILE".to_string(), home.display().to_string());
+    harness.harness.create_file(
+        ".agents/skills/acp-project/SKILL.md",
+        b"---\nname: acp-project\ndescription: ACP project universal skill\n---\nProject skill body.\n",
+    );
+    let user_skill = home.join(".agents/skills/acp-user/SKILL.md");
+    fs::create_dir_all(user_skill.parent().expect("user skill parent"))
+        .expect("create user skill directory");
+    fs::write(
+        &user_skill,
+        b"---\nname: acp-user\ndescription: ACP user universal skill\n---\nUser skill body.\n",
+    )
+    .expect("write user skill");
+    let server = harness.harness.start_mock_http_server();
+    server.add_route("POST", "/v1/chat/completions", skill_discovery_response());
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent directory"),
+    );
+    fs::create_dir_all(&agent_dir).expect("create agent directory");
+    fs::write(agent_dir.join("auth.json"), b"{}").expect("write empty auth store");
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "acp-launch-fixture": {
+                    "api": "openai-completions",
+                    "baseUrl": format!("{}/v1", server.base_url()),
+                    "authHeader": true,
+                    "models": [
+                        { "id": "configured-default", "reasoning": false },
+                        { "id": "cli-selected", "reasoning": true }
+                    ]
+                }
+            }
+        }))
+        .expect("serialize launch models"),
+    )
+    .expect("write launch models");
+    fs::write(
+        harness.global_settings_path(),
+        serde_json::to_vec_pretty(&json!({
+            "defaultProvider": "acp-launch-fixture",
+            "defaultModel": "configured-default",
+            "defaultThinkingLevel": "off",
+            "retry": {"enabled": false},
+            "compaction": {"enabled": false}
+        }))
+        .expect("serialize launch settings"),
+    )
+    .expect("write launch settings");
+
+    // No configured key makes this custom provider unready. The explicit
+    // launch key must enable selection without becoming protocol metadata.
+    // The eventual prompt uses only a loopback provider and also proves that
+    // automatic skills from the launch cwd reach the editor's real session.
+    let owner = pi::agent_cx::AgentCx::for_request();
+    let stderr_path = harness.harness.temp_path("acp.stderr.txt");
+    let stderr = fs::File::create(&stderr_path).expect("create ACP diagnostics");
+    harness
+        .harness
+        .record_artifact("acp.stderr.txt", &stderr_path);
+    let mut command = owner.process().command(&harness.binary_path);
+    command
+        .args([
+            "--acp",
+            "--provider",
+            "acp-launch-fixture",
+            "--model",
+            "cli-selected",
+            "--thinking",
+            "high",
+            "--api-key",
+            "acp-launch-fixture-key",
+            "--request-timeout",
+            "60",
+            "--trust",
+            "--tools",
+            "read",
+            "--no-mcp",
+            "--no-extensions",
+            "--no-context-files",
+            "--no-prompt-templates",
+            "--no-themes",
+        ])
+        .env_clear()
+        .envs(harness.env.clone())
+        // A launch flag already overrides this invalid inherited value.
+        // Session construction must not reparse unrelated environment flags.
+        .env("PI_HTTP_REQUEST_TIMEOUT_SECS", "invalid")
+        .current_dir(harness.harness.temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr));
+    // AgentChild also kills and reaps on an assertion failure.
+    let mut child = command.spawn().expect("start ACP CLI");
+    let mut input = child.take_stdin().expect("ACP stdin");
+    let output = child.take_stdout().expect("ACP stdout");
+    let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+    let reader = std::thread::spawn(move || {
+        let mut output = std::io::BufReader::new(output);
+        loop {
+            let mut line = String::new();
+            // Bound each protocol frame, including the full model catalogue.
+            let read = (&mut output).take(8 * 1024 * 1024).read_line(&mut line);
+            let result = match read {
+                Ok(0) => break,
+                Ok(_) if !line.ends_with('\n') => {
+                    Err("ACP frame exceeded its bound or ended early".to_string())
+                }
+                Ok(_) => serde_json::from_str::<serde_json::Value>(&line)
+                    .map_err(|error| format!("invalid ACP JSON: {error}")),
+                Err(error) => Err(format!("ACP stdout read: {error}")),
+            };
+            let failed = result.is_err();
+            if sender.send(result).is_err() || failed {
+                break;
+            }
+        }
+    });
+    let mut exchange = |request: serde_json::Value| {
+        serde_json::to_writer(&mut input, &request).expect("write ACP request");
+        input.write_all(b"\n").expect("delimit ACP request");
+        input.flush().expect("flush ACP request");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let response = loop {
+            let response = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("ACP response before deadline")
+                .expect("valid ACP protocol frame");
+            if response.get("id").is_some() {
+                break response;
+            }
+            assert_eq!(response["method"], "session/update");
+        };
+        assert_eq!(response["id"], request["id"], "matching JSON-RPC response");
+        assert!(response.get("error").is_none(), "ACP error: {response}");
+        response
+    };
+
+    let initialized = exchange(json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": 1, "clientCapabilities": {} }
+    }));
+    assert_eq!(initialized["result"]["protocolVersion"], 1);
+    let created = exchange(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": { "cwd": harness.harness.temp_dir(), "mcpServers": [] }
+    }));
+    assert!(created["result"]["sessionId"].as_str().is_some());
+    let selections = created["result"]["configOptions"]
+        .as_array()
+        .expect("ACP configuration selectors");
+    let selected = |id: &str| {
+        selections
+            .iter()
+            .find(|option| option["id"].as_str() == Some(id))
+            .and_then(|option| option["currentValue"].as_str())
+            .expect("selected ACP configuration value")
+    };
+    assert_eq!(selected("model"), "acp-launch-fixture/cli-selected");
+    assert_eq!(selected("thought_level"), "high");
+    assert!(
+        !serde_json::to_string(&created)
+            .expect("serialize ACP response")
+            .contains("acp-launch-fixture-key"),
+        "a launch credential must not appear in editor metadata"
+    );
+
+    let prompted = exchange(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {"sessionId": created["result"]["sessionId"],
+            "prompt": [{"type": "text", "text": "Check the skill catalogue."}]}
+    }));
+    assert_eq!(prompted["result"]["stopReason"], "end_turn");
+    let captured = server.requests();
+    assert_eq!(captured.len(), 1, "one ACP provider turn");
+    let request: serde_json::Value =
+        serde_json::from_slice(&captured[0].body).expect("ACP provider request");
+    let system = request["messages"]
+        .as_array()
+        .expect("ACP provider messages")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .expect("ACP system prompt");
+    assert!(system.contains("ACP project universal skill"), "{system}");
+    assert!(system.contains("ACP user universal skill"), "{system}");
+    assert!(!system.contains("Project skill body."));
+    assert!(!system.contains("User skill body."));
+
+    // Keep stdin open until all replies arrive: this tests the real dispatcher,
+    // without a race between an early client EOF and response delivery.
+    let _ = exchange(json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown" }));
+    input
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}\n")
+        .expect("send ACP exit notification");
+    input.flush().expect("flush ACP exit");
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll ACP exit") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "ACP did not stop after exit");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "ACP exited unsuccessfully: {status}");
+    reader.join().expect("ACP output reader stopped");
+}
+
+#[test]
+fn e2e_cli_fetch_models_uses_models_json_route_credentials_and_headers() {
+    let harness =
+        CliTestHarness::new("e2e_cli_fetch_models_uses_models_json_route_credentials_and_headers");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind catalog fixture");
+    let address = listener.local_addr().expect("fixture address");
+    listener
+        .set_nonblocking(true)
+        .expect("make fixture accept bounded");
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "catalog fixture was never called"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept catalog request: {error}"),
+            }
+        };
+        let request = read_catalog_request_headers(&mut stream);
+        let body = br#"{"data":[{"id":"z/model"},{"id":"a/model"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write catalog response headers");
+        stream.write_all(body).expect("write catalog response");
+        String::from_utf8(request).expect("request headers are UTF-8")
+    });
+
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    );
+    fs::create_dir_all(&agent_dir).expect("create isolated agent dir");
+    #[cfg(unix)]
+    let _denied_auth = deny_auth_fixture_reads(&agent_dir);
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "acme": {
+                    "api": "openai-completions",
+                    "baseUrl": format!("http://{address}/v1"),
+                    "apiKey": "models-json-secret",
+                    "authHeader": true,
+                    "headers": {
+                        "Authorization": "   ",
+                        "x-catalog-tenant": "tenant-a"
+                    }
+                }
+            }
+        }))
+        .expect("serialize custom catalog route"),
+    )
+    .expect("write custom catalog route");
+
+    let result = harness.run(&[
+        "--fetch-models",
+        "acme",
+        "--refresh-models",
+        "--request-timeout",
+        "5",
+    ]);
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_eq!(result.stdout, "a/model\nz/model\n");
+    let request = server.join().expect("catalog fixture thread");
+    let request_lower = request.to_ascii_lowercase();
+    assert!(
+        request.starts_with("GET /v1/models HTTP/1.1\r\n"),
+        "{request}"
+    );
+    assert!(
+        request_lower.contains("authorization: bearer models-json-secret\r\n"),
+        "{request}"
+    );
+    assert_eq!(
+        request_lower.matches("authorization:").count(),
+        1,
+        "blank custom Authorization must not replace or duplicate generated auth: {request}"
+    );
+    assert!(
+        request_lower.contains("x-catalog-tenant: tenant-a\r\n"),
+        "{request}"
+    );
+}
+
+#[test]
+fn e2e_cli_fetch_models_custom_authorization_skips_held_auth_lock() {
+    let harness =
+        CliTestHarness::new("e2e_cli_fetch_models_custom_authorization_skips_held_auth_lock");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind catalog fixture");
+    let address = listener.local_addr().expect("fixture address");
+    listener
+        .set_nonblocking(true)
+        .expect("make fixture accept bounded");
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "catalog fixture was never called"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept catalog request: {error}"),
+            }
+        };
+        let request = read_catalog_request_headers(&mut stream);
+        let body = br#"{"data":[{"id":"custom-auth-model"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write catalog response headers");
+        stream.write_all(body).expect("write catalog response");
+        String::from_utf8(request).expect("request headers are UTF-8")
+    });
+
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    );
+    fs::create_dir_all(&agent_dir).expect("create isolated agent dir");
+    let auth_path = agent_dir.join("auth.json");
+    let _held_auth_lock = pi::file_lock::DirLock::acquire_for(&auth_path, Duration::from_secs(1))
+        .expect("hold auth lock while custom-authorization catalog fetch runs");
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "acme": {
+                    "api": "openai-completions",
+                    "baseUrl": format!("http://{address}/v1"),
+                    "headers": {
+                        "Authorization": "Token configured-only"
+                    }
+                }
+            }
+        }))
+        .expect("serialize custom catalog route"),
+    )
+    .expect("write custom catalog route");
+
+    let result = harness.run(&[
+        "--fetch-models",
+        "acme",
+        "--refresh-models",
+        "--request-timeout",
+        "5",
+    ]);
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_eq!(result.stdout, "custom-auth-model\n");
+    let request = server.join().expect("catalog fixture thread");
+    let request_lower = request.to_ascii_lowercase();
+    assert!(
+        request_lower.contains("authorization: token configured-only\r\n"),
+        "{request}"
+    );
+    assert_eq!(request_lower.matches("authorization:").count(), 1);
+}
+
+#[test]
+fn e2e_cli_fetch_models_ignores_text_input_guards() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_ignores_text_input_guards");
+    for presentation_flag in ["--print", "--mode=text"] {
+        let result = harness.run(&["--fetch-models", "openai", presentation_flag]);
+        assert_exit_code(&harness.harness, &result, 0);
+        assert!(
+            result.stdout.lines().any(|line| !line.trim().is_empty()),
+            "{presentation_flag} must not make standalone model discovery require prompt input"
+        );
+    }
+}
+
+#[test]
+fn e2e_cli_fetch_models_only_conflicts_with_explicit_hide_cwd_flag() {
+    let mut harness =
+        CliTestHarness::new("e2e_cli_fetch_models_only_conflicts_with_explicit_hide_cwd_flag");
+    harness
+        .env
+        .insert("PI_HIDE_CWD_IN_PROMPT".to_string(), "true".to_string());
+
+    let env_only = harness.run(&["--fetch-models", "openai"]);
+    assert_exit_code(&harness.harness, &env_only, 0);
+    assert!(
+        env_only.stdout.lines().any(|line| !line.trim().is_empty()),
+        "ambient prompt-presentation policy must not block standalone discovery"
+    );
+
+    let explicit = harness.run(&["--fetch-models", "openai", "--hide-cwd-in-prompt"]);
+    assert_exit_code(&harness.harness, &explicit, 2);
+    assert_contains(
+        &harness.harness,
+        &explicit.stderr,
+        "--fetch-models cannot be combined with --hide-cwd-in-prompt",
+    );
+}
+
+#[test]
+fn e2e_cli_fetch_models_rejects_ambiguous_terminal_actions() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_rejects_ambiguous_terminal_actions");
+    let cases: &[&[&str]] = &[
+        &["--fetch-models", "openai", "--list-models"],
+        &["--fetch-models", "openai", "--list-providers"],
+        &["--fetch-models", "openai", "--mode=json"],
+        &["--fetch-models", "openai", "--thinking", "high"],
+        &["--fetch-models", "openai", "--session", "ignored.jsonl"],
+        &["--fetch-models", "openai", "--no-tools"],
+        &["--fetch-models", "openai", "--theme", "dark"],
+        &["--fetch-models", "openai", "--provider", "openai"],
+        &["--fetch-models", "openai", "ignored prompt"],
+    ];
+    for args in cases {
+        let result = harness.run(args);
+        assert_exit_code(&harness.harness, &result, 2);
+        assert_contains(
+            &harness.harness,
+            &result.stderr,
+            "--fetch-models cannot be combined",
+        );
+    }
+}
+
+#[test]
+fn e2e_cli_fetch_models_keyless_persist_updates_list_models_despite_held_auth_lock() {
+    let harness = CliTestHarness::new(
+        "e2e_cli_fetch_models_keyless_persist_updates_list_models_despite_held_auth_lock",
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind catalog fixture");
+    let address = listener.local_addr().expect("catalog fixture address");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog accept bounded");
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "catalog request timed out");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept catalog request: {error}"),
+            }
+        };
+        let _request = read_catalog_request_headers(&mut stream);
+        let body = br#"{"data":[{"id":"issue-150-live-model"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write catalog response headers");
+        stream.write_all(body).expect("write catalog response");
+    });
+
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    );
+    fs::create_dir_all(&agent_dir).expect("create isolated agent dir");
+    let auth_path = agent_dir.join("auth.json");
+    let held_auth_lock = pi::file_lock::DirLock::acquire_for(&auth_path, Duration::from_secs(1))
+        .expect("hold auth lock while keyless catalog fetch runs");
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "acme": {
+                    "api": "openai-completions",
+                    "baseUrl": format!("http://{address}/v1"),
+                    "authHeader": false
+                }
+            }
+        }))
+        .expect("serialize models route"),
+    )
+    .expect("write models route");
+
+    let persisted = harness.run(&[
+        "--fetch-models",
+        "acme",
+        "--refresh-models",
+        "--persist-models",
+    ]);
+    assert_exit_code(&harness.harness, &persisted, 0);
+    assert_eq!(persisted.stdout, "issue-150-live-model\n");
+    server.join().expect("catalog fixture thread");
+    drop(held_auth_lock);
+
+    let result = harness.run(&["--list-models", "issue-150-live-model"]);
+
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_contains(&harness.harness, &result.stdout, "acme");
+    assert_contains(&harness.harness, &result.stdout, "issue-150-live-model");
+}
+
+#[test]
+fn e2e_cli_persist_models_rejects_static_fallback() {
+    let harness = CliTestHarness::new("e2e_cli_persist_models_rejects_static_fallback");
+    let result = harness.run(&["--fetch-models", "openai", "--persist-models"]);
+
+    assert_exit_code(&harness.harness, &result, 1);
+    assert!(
+        result.stdout.is_empty(),
+        "a rejected persistence request must not emit a misleading catalog"
+    );
+    assert_contains(&harness.harness, &result.stderr, "Refusing to persist");
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    );
+    assert!(
+        !agent_dir.join("models.fetched.json").exists(),
+        "static fallback must never be persisted"
+    );
+}
+
+#[test]
+fn e2e_cli_refresh_models_requires_a_live_result() {
+    let harness = CliTestHarness::new("e2e_cli_refresh_models_requires_a_live_result");
+    let result = harness.run(&["--fetch-models", "openai", "--refresh-models"]);
+
+    assert_exit_code(&harness.harness, &result, 1);
+    assert!(
+        result.stdout.is_empty(),
+        "strict refresh must not print fallback rows"
+    );
+    assert_contains(&harness.harness, &result.stderr, "api_key");
+}
+
+#[test]
+fn e2e_cli_fetch_models_rejects_unknown_empty_catalog() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_rejects_unknown_empty_catalog");
+    let result = harness.run(&["--fetch-models", "definitely-not-a-provider"]);
+
+    assert_exit_code(&harness.harness, &result, 1);
+    assert!(
+        result.stdout.is_empty(),
+        "unknown providers must not look successful"
+    );
+    assert_contains(&harness.harness, &result.stderr, "No models available");
+    assert_contains(
+        &harness.harness,
+        &result.stderr,
+        "definitely-not-a-provider",
+    );
+}
+
+#[test]
+fn e2e_cli_fetch_models_rejects_unsafe_static_fallback_ids() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_rejects_unsafe_static_fallback_ids");
+    let agent_dir = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    );
+    fs::create_dir_all(&agent_dir).expect("create isolated agent dir");
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "openai": {
+                    "models": [{"id": "unsafe\nmodel"}]
+                }
+            }
+        }))
+        .expect("serialize unsafe manual catalog"),
+    )
+    .expect("write unsafe manual catalog");
+
+    let result = harness.run(&["--fetch-models", "openai"]);
+    assert_exit_code(&harness.harness, &result, 1);
+    assert!(result.stdout.is_empty());
+    assert_contains(&harness.harness, &result.stderr, "not printable ASCII");
+}
+
+/// bd-print-json-panics-on-closed-stdout: `pi --print --mode json | head` must
+/// end quietly, not panic and file a crash report against the user.
+///
+/// `println!` panics when the write fails, and Rust disables SIGPIPE at
+/// startup, so a reader that closed the pipe used to arrive as EPIPE on every
+/// subsequent write and take the process down with
+/// "failed printing to stdout: Broken pipe". The crash bundle then announced
+/// itself as "previous run crashed" on the NEXT invocation, so the noise
+/// outlived the run that caused it.
+///
+/// The bundle directory is the assertion because it is the part a user sees.
+/// No provider credentials are configured here and none are needed: the
+/// `session` frame is written before any provider is touched, which is already
+/// past the write that used to panic.
+#[test]
+fn e2e_cli_print_json_ends_quietly_when_its_reader_closes_the_pipe() {
+    let harness = CliTestHarness::new("e2e_cli_print_json_ends_quietly_when_its_reader_closes");
+    let mut command = Command::new(&harness.binary_path);
+    command
+        .args(["--print", "--mode", "json", "hello"])
+        .envs(harness.env.clone())
+        .current_dir(harness.harness.temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("spawn pi --print --mode json");
+
+    // Read one line, then drop the pipe — this is `| head -1`.
+    let stdout = child.stdout.take().expect("child stdout pipe");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut first).expect("read the first frame");
+    assert!(
+        first.contains("\"type\":\"session\""),
+        "expected the session frame first, got {first:?}"
+    );
+    drop(reader);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if child.try_wait().expect("poll pi").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pi did not exit after its stdout reader went away"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let crashes = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("isolated agent dir"),
+    )
+    .join("crashes");
+    let bundles: Vec<String> = fs::read_dir(&crashes)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        bundles.is_empty(),
+        "a closed stdout pipe must not produce a crash bundle; found {bundles:?} in {}",
+        crashes.display()
+    );
+}
+
+/// GH #264: `pi --help | head -3` printed "Broken pipe (os error 32)" and
+/// exited 1, so `set -o pipefail` scripts that grep the help text failed.
+/// The read end is closed before pi starts, so every write is EPIPE; a reader
+/// that leaves mid-output would only race the pipe buffer.
+#[test]
+fn e2e_cli_help_and_version_end_quietly_when_the_reader_closed_the_pipe() {
+    let harness = CliTestHarness::new("e2e_cli_help_and_version_end_quietly_into_a_closed_pipe");
+    for flag in ["--help", "--version"] {
+        let (reader, writer) = std::io::pipe().expect("create stdout pipe");
+        drop(reader);
+        let output = Command::new(&harness.binary_path)
+            .arg(flag)
+            .envs(harness.env.clone())
+            .current_dir(harness.harness.temp_dir())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run pi into a closed pipe");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "pi {flag} into a closed pipe exited {:?}; stderr: {stderr}",
+            output.status
+        );
+        assert!(
+            !stderr.contains("Broken pipe"),
+            "pi {flag} reported the closed pipe as an error: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn e2e_cli_fetch_models_does_not_wait_for_stdin_eof() {
+    let harness = CliTestHarness::new("e2e_cli_fetch_models_does_not_wait_for_stdin_eof");
+    let mut command = Command::new(&harness.binary_path);
+    command
+        .args(["--fetch-models", "openai"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GROQ_API_KEY")
+        .envs(harness.env.clone())
+        .current_dir(harness.harness.temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("run pi with held-open stdin");
+    let held_stdin = child.stdin.take().expect("child stdin pipe");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll fetch-models process") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("terminate stuck fetch-models process");
+            drop(held_stdin);
+            child.wait().expect("reap stuck fetch-models process");
+            panic!("standalone --fetch-models waited for stdin EOF");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    drop(held_stdin);
+    assert!(
+        status.success(),
+        "fetch-models should ignore an open stdin pipe"
+    );
+}
+
+#[test]
 fn e2e_cli_version_flag() {
     let harness = CliTestHarness::new("e2e_cli_version_flag");
     let result = harness.run(&["--version"]);
@@ -1205,6 +2102,70 @@ fn e2e_cli_config_subcommand_json_output() {
     assert!(
         payload.get("configValid").is_some(),
         "missing configValid flag"
+    );
+}
+
+/// Startup-style resolution of already-installed user-scoped npm packages
+/// must run `npm root -g` exactly once per pass and must not shell out to
+/// the installer at all (issue described in PR #140).
+#[cfg(unix)]
+#[test]
+fn e2e_cli_config_resolves_installed_user_packages_with_one_npm_root_lookup() {
+    let mut harness = CliTestHarness::new(
+        "e2e_cli_config_resolves_installed_user_packages_with_one_npm_root_lookup",
+    );
+    let ledger = harness.harness.temp_path("fake-npm-ledger.log");
+    harness.env.insert(
+        "PI_E2E_FAKE_NPM_LEDGER".to_string(),
+        ledger.display().to_string(),
+    );
+
+    // Pre-install two packages in the fake global npm prefix, matching their
+    // configured range/exact specs.
+    let global_node_modules = PathBuf::from(
+        harness
+            .env
+            .get("npm_config_prefix")
+            .expect("harness sets an isolated npm prefix"),
+    )
+    .join("lib")
+    .join("node_modules");
+    for (name, version) in [("first-user-pkg", "1.4.0"), ("second-user-pkg", "2.0.0")] {
+        let package_dir = global_node_modules.join(name);
+        fs::create_dir_all(&package_dir).expect("create fake global npm package");
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec(&json!({ "name": name, "version": version }))
+                .expect("serialize package.json"),
+        )
+        .expect("write package.json");
+    }
+    fs::write(
+        harness.global_settings_path(),
+        serde_json::to_vec(&json!({
+            "packages": ["npm:first-user-pkg@^1.2.0", "npm:second-user-pkg@2.0.0"]
+        }))
+        .expect("serialize global settings"),
+    )
+    .expect("write global settings");
+
+    let result = harness.run(&["config", "--json"]);
+    assert_exit_code(&harness.harness, &result, 0);
+
+    let invocations = fs::read_to_string(&ledger).expect("fake npm ledger should exist");
+    let root_lookups = invocations
+        .lines()
+        .filter(|line| *line == "root -g")
+        .count();
+    assert_eq!(
+        root_lookups, 1,
+        "expected exactly one `npm root -g` per resolution pass, got:\n{invocations}"
+    );
+    assert!(
+        !invocations
+            .lines()
+            .any(|line| line.starts_with("install") || line.starts_with("uninstall")),
+        "already-satisfied packages must not trigger install work:\n{invocations}"
     );
 }
 
@@ -1369,6 +2330,9 @@ fn e2e_cli_config_show_reports_empty_packages_when_none_configured() {
 fn e2e_cli_config_show_lists_discovered_package_resources() {
     let mut harness = CliTestHarness::new("e2e_cli_config_show_lists_discovered_package_resources");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
 
     let package_root = harness.harness.create_dir("config-ui-pkg");
     fs::create_dir_all(package_root.join("extensions")).expect("create package extensions");
@@ -1429,10 +2393,257 @@ fn e2e_cli_config_show_lists_discovered_package_resources() {
     assert_contains(&harness.harness, &result.stdout, "themes/night.json");
 }
 
+#[cfg(unix)]
+fn skill_discovery_response() -> MockHttpResponse {
+    let chunk = json!({
+        "id": "universal-skill-response", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Skill received."},
+            "finish_reason": null}]
+    });
+    let done = json!({
+        "id": "universal-skill-response",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    });
+    MockHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n").into_bytes(),
+    }
+}
+
+/// Exercise the binary's package/resource startup path, prompt construction,
+/// and skill-command expansion against a loopback provider. In particular,
+/// `ResourceLoader::load` must discover the same defaults as `load_skills`.
+/// Unix home lookup honors the child's isolated HOME; Windows known-folder
+/// lookup is covered with explicit homes by the package/resource loader tests.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_cli_universal_skills_reach_print_json_and_rpc() {
+    let mut harness = CliTestHarness::new("e2e_cli_universal_skills_reach_print_json_and_rpc");
+    // An explicit config path intentionally disables project discovery.
+    harness.env.remove("PI_CONFIG_PATH");
+    let home = PathBuf::from(&harness.env["HOME"]);
+    harness
+        .env
+        .insert("USERPROFILE".to_string(), home.display().to_string());
+    let project_skill = harness.harness.create_file(
+        ".agents/skills/project-check/SKILL.md",
+        b"---\nname: project-check\ndescription: Project universal check\n---\nPROJECT_UNIVERSAL_BODY\n",
+    );
+    let user_skill = home.join(".agents/skills/user-check/SKILL.md");
+    fs::create_dir_all(user_skill.parent().expect("user skill parent"))
+        .expect("create universal user directory");
+    fs::write(
+        &user_skill,
+        b"---\nname: user-check\ndescription: User universal check\n---\nUSER_UNIVERSAL_BODY\n",
+    )
+    .expect("write universal user skill");
+    let explicit_skill = harness.harness.create_file(
+        "explicit-check/SKILL.md",
+        b"---\nname: explicit-check\ndescription: Explicit skill check\n---\nEXPLICIT_SKILL_BODY\n",
+    );
+
+    let server = harness.harness.start_mock_http_server();
+    server.add_route("POST", "/v1/chat/completions", skill_discovery_response());
+    let agent_dir = PathBuf::from(&harness.env["PI_CODING_AGENT_DIR"]);
+    fs::create_dir_all(&agent_dir).expect("create isolated agent directory");
+    fs::write(agent_dir.join("auth.json"), b"{}").expect("write isolated auth");
+    fs::write(
+        agent_dir.join("models.json"),
+        json!({"providers": {"universal-skills-fixture": {
+            "api": "openai-completions", "baseUrl": format!("{}/v1", server.base_url()),
+            "apiKey": "offline-fixture", "authHeader": true,
+            "models": [{"id": "offline", "reasoning": false, "contextWindow": 32_000,
+                "maxTokens": 128}]
+        }}})
+        .to_string(),
+    )
+    .expect("write loopback provider");
+    fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"retry":{"enabled":false},"compaction":{"enabled":false}}"#,
+    )
+    .expect("write isolated settings");
+
+    for mode in ["text", "json", "rpc"] {
+        for no_skills in [false, true] {
+            let mut args = vec![
+                "--mode",
+                mode,
+                "--provider",
+                "universal-skills-fixture",
+                "--model",
+                "offline",
+                "--trust",
+                "--no-session",
+                "--no-mcp",
+                "--no-extensions",
+                "--no-prompt-templates",
+                "--no-themes",
+                "--no-context-files",
+                "--tools",
+                "read",
+                "--thinking",
+                "off",
+            ];
+            let (input, body_marker) = if no_skills {
+                args.extend([
+                    "--no-skills",
+                    "--skill",
+                    explicit_skill.to_str().expect("skill path"),
+                ]);
+                (
+                    "/skill:explicit-check invocation-argument",
+                    "EXPLICIT_SKILL_BODY",
+                )
+            } else {
+                (
+                    "/skill:project-check invocation-argument",
+                    "PROJECT_UNIVERSAL_BODY",
+                )
+            };
+            let request_count = server.requests().len();
+            let result = if mode == "rpc" {
+                let stdin = format!(
+                    "{}\n{}\n",
+                    json!({"id": "skills", "type": "get_commands"}),
+                    json!({"id": "invoke", "type": "prompt", "message": input}),
+                );
+                harness.run_with_stdin(&args, Some(stdin.as_bytes()))
+            } else {
+                args.extend(["--print", input]);
+                harness.run(&args)
+            };
+            assert_exit_code(&harness.harness, &result, 0);
+            assert_contains(&harness.harness, &result.stdout, "Skill received.");
+
+            if mode == "rpc" {
+                let records = parse_json_mode_stdout_lines(&result.stdout);
+                let response = records
+                    .iter()
+                    .find(|record| record["id"] == "skills")
+                    .expect("RPC get_commands response");
+                assert_eq!(response["success"], true);
+                let commands = response["data"]["commands"]
+                    .as_array()
+                    .expect("RPC commands");
+                let names = commands
+                    .iter()
+                    .map(|command| command["name"].as_str().expect("command name"))
+                    .collect::<Vec<_>>();
+                if no_skills {
+                    assert_eq!(names, ["skill:explicit-check"]);
+                } else {
+                    assert!(names.contains(&"skill:project-check"));
+                    assert!(names.contains(&"skill:user-check"));
+                }
+            }
+
+            let captured = server.requests();
+            assert_eq!(
+                captured.len(),
+                request_count + 1,
+                "one provider turn per invocation"
+            );
+            let request: serde_json::Value = serde_json::from_slice(&captured[request_count].body)
+                .expect("provider request JSON");
+            let messages = request["messages"].as_array().expect("provider messages");
+            let system = messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .map(|message| message["content"].as_str().expect("system text"))
+                .collect::<String>();
+            assert_eq!(system.contains("Project universal check"), !no_skills);
+            assert_eq!(system.contains("User universal check"), !no_skills);
+            assert_eq!(system.contains("Explicit skill check"), no_skills);
+            assert!(
+                !system.contains(body_marker),
+                "skill bodies load on invocation"
+            );
+            if !no_skills {
+                assert!(system.contains(project_skill.to_str().expect("project path")));
+                assert!(system.contains(user_skill.to_str().expect("user path")));
+            }
+            let user = messages
+                .iter()
+                .find(|message| message["role"] == "user")
+                .expect("user request")
+                .to_string();
+            assert!(
+                user.contains(body_marker),
+                "{mode}: skill invocation was not expanded: {user}"
+            );
+            assert!(user.contains("invocation-argument"));
+            assert!(
+                !user.contains("/skill:"),
+                "raw skill command reached the provider"
+            );
+        }
+    }
+}
+
+#[test]
+fn e2e_cli_startup_surfaces_configured_resource_failures() {
+    let mut harness = CliTestHarness::new("e2e_cli_startup_surfaces_configured_resource_failures");
+    harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
+    // `--list-models` alone short-circuits in main.rs long before resources are
+    // loaded, so it never reaches the diagnostic write and this asserted on an
+    // empty stderr. Compat scanning is the documented way to make that flag
+    // boot the normal startup path — which is the path this test is named for.
+    harness
+        .env
+        .insert("PI_EXT_COMPAT_SCAN".to_string(), "1".to_string());
+
+    let package_root = harness.harness.create_dir("diagnostic-pkg");
+    let skill = package_root.join("skills/oversized-skill/SKILL.md");
+    let prompt = package_root.join("prompts/oversized-prompt.md");
+    let theme = package_root.join("themes/oversized-theme.ini");
+    for path in [&skill, &prompt, &theme] {
+        fs::create_dir_all(path.parent().expect("resource parent")).expect("create resource dir");
+        let file = fs::File::create(path).expect("create oversized resource");
+        file.set_len(2 * 1024 * 1024)
+            .expect("extend oversized resource");
+    }
+    let project_settings = harness.harness.temp_dir().join(".pi/settings.json");
+    fs::create_dir_all(project_settings.parent().expect("settings parent"))
+        .expect("create settings dir");
+    fs::write(
+        &project_settings,
+        serde_json::to_vec_pretty(&json!({"packages": ["diagnostic-pkg"]}))
+            .expect("serialize settings"),
+    )
+    .expect("write settings");
+
+    let result = harness.run(&["--list-models"]);
+    assert_exit_code(&harness.harness, &result, 0);
+    for (label, path) in [
+        ("skill resource diagnostic", &skill),
+        ("prompt template resource diagnostic", &prompt),
+        ("theme resource diagnostic", &theme),
+    ] {
+        assert_contains(&harness.harness, &result.stderr, label);
+        assert_contains(
+            &harness.harness,
+            &result.stderr,
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .expect("UTF-8 fixture"),
+        );
+    }
+    assert_contains(&harness.harness, &result.stderr, "resource limit");
+}
+
 #[test]
 fn e2e_cli_config_show_surfaces_invalid_package_settings() {
     let mut harness = CliTestHarness::new("e2e_cli_config_show_surfaces_invalid_package_settings");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
     let project_settings = harness.harness.temp_dir().join(".pi").join("settings.json");
     fs::create_dir_all(
         project_settings
@@ -1469,6 +2680,9 @@ fn e2e_cli_config_without_tty_surfaces_invalid_package_settings() {
     let mut harness =
         CliTestHarness::new("e2e_cli_config_without_tty_surfaces_invalid_package_settings");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
     let project_settings = harness.harness.temp_dir().join(".pi").join("settings.json");
     fs::create_dir_all(
         project_settings
@@ -1498,6 +2712,131 @@ fn e2e_cli_config_without_tty_surfaces_invalid_package_settings() {
         &harness.harness,
         &result.stderr,
         &project_settings.display().to_string(),
+    );
+}
+
+fn write_untrusted_workspace_surface(harness: &CliTestHarness) {
+    let extensions_dir = harness.harness.temp_dir().join(".pi").join("extensions");
+    fs::create_dir_all(&extensions_dir).expect("create project extensions dir");
+    fs::write(
+        extensions_dir.join("marker.js"),
+        "export default function init() {}\n",
+    )
+    .expect("write project extension");
+}
+
+#[test]
+fn e2e_cli_workspace_trust_fails_closed_non_interactive() {
+    let mut harness = CliTestHarness::new("e2e_cli_workspace_trust_fails_closed_non_interactive");
+    // The default PI_CONFIG_PATH override would legitimately skip the gate.
+    harness.env.remove("PI_CONFIG_PATH");
+    write_untrusted_workspace_surface(&harness);
+
+    // Non-interactive main-path launch (piped stdio): the gate must fail
+    // closed with a warning and must not persist a decision.
+    let result = harness.run(&["-p", "ping"]);
+    assert_contains(&harness.harness, &result.stderr, "workspace not trusted");
+    let store_path = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("agent dir env"),
+    )
+    .join("workspace-trust.json");
+    assert!(
+        !store_path.exists(),
+        "non-interactive denial must not persist a trust decision"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_cli_package_fast_paths_skip_untrusted_project_updates() {
+    let mut harness =
+        CliTestHarness::new("e2e_cli_package_fast_paths_skip_untrusted_project_updates");
+    harness.env.remove("PI_CONFIG_PATH");
+    let npm_ledger = harness.harness.temp_path("untrusted-update-npm.log");
+    harness.env.insert(
+        "PI_E2E_FAKE_NPM_LEDGER".to_string(),
+        npm_ledger.display().to_string(),
+    );
+    let project_settings = harness.harness.temp_dir().join(".pi/settings.json");
+    fs::create_dir_all(project_settings.parent().expect("project settings parent"))
+        .expect("create project settings dir");
+    fs::write(
+        &project_settings,
+        serde_json::to_string_pretty(&json!({ "packages": ["npm:blocked-project-pkg"] }))
+            .expect("serialize project settings"),
+    )
+    .expect("write project settings");
+
+    let update = harness.run(&["update"]);
+    assert_exit_code(&harness.harness, &update, 0);
+    assert_contains(&harness.harness, &update.stderr, "workspace not trusted");
+    assert!(
+        !npm_ledger.exists(),
+        "the synchronous update fast path must not execute an untrusted project package"
+    );
+
+    let list = harness.run(&["list"]);
+    assert_exit_code(&harness.harness, &list, 0);
+    assert_contains(&harness.harness, &list.stdout, "No packages installed.");
+    assert!(!list.stdout.contains("blocked-project-pkg"));
+
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
+    let trusted_list = harness.run(&["list"]);
+    assert_exit_code(&harness.harness, &trusted_list, 0);
+    assert_contains(
+        &harness.harness,
+        &trusted_list.stdout,
+        "blocked-project-pkg",
+    );
+}
+
+#[test]
+fn e2e_cli_workspace_trust_env_override_and_flag_persistence() {
+    let mut harness =
+        CliTestHarness::new("e2e_cli_workspace_trust_env_override_and_flag_persistence");
+    harness.env.remove("PI_CONFIG_PATH");
+    write_untrusted_workspace_surface(&harness);
+
+    // PI_WORKSPACE_TRUST=trusted suppresses the warning without persisting.
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
+    let result = harness.run(&["-p", "ping"]);
+    assert!(
+        !result.stderr.contains("workspace not trusted"),
+        "env-trusted run must not warn about workspace trust; stderr: {}",
+        result.stderr
+    );
+    harness.env.remove("PI_WORKSPACE_TRUST");
+
+    // --trust persists the decision for the current content digest.
+    let result = harness.run(&["--trust", "-p", "ping"]);
+    assert!(
+        !result.stderr.contains("workspace not trusted"),
+        "--trust run must not warn about workspace trust; stderr: {}",
+        result.stderr
+    );
+    let store_path = PathBuf::from(
+        harness
+            .env
+            .get("PI_CODING_AGENT_DIR")
+            .expect("agent dir env"),
+    )
+    .join("workspace-trust.json");
+    let store = fs::read_to_string(&store_path).expect("read workspace trust store");
+    assert_contains(&harness.harness, &store, "\"decision\": \"trusted\"");
+
+    // A follow-up run without the flag reuses the stored decision.
+    let result = harness.run(&["-p", "ping"]);
+    assert!(
+        !result.stderr.contains("workspace not trusted"),
+        "stored trust must suppress the warning; stderr: {}",
+        result.stderr
     );
 }
 
@@ -1545,6 +2884,10 @@ fn e2e_cli_export_missing_input_is_error() {
 fn e2e_cli_export_permission_denied_is_error() {
     use std::os::unix::fs::PermissionsExt;
 
+    if running_as_root() {
+        eprintln!("skipping: a read-only directory is writable by root");
+        return;
+    }
     let harness = CliTestHarness::new("e2e_cli_export_permission_denied_is_error");
     let session_path = harness.harness.temp_path("session.jsonl");
     let _ = write_minimal_session(&session_path, harness.harness.temp_dir());
@@ -1740,6 +3083,9 @@ fn e2e_cli_list_subcommand_works_offline() {
 fn e2e_cli_packages_install_list_remove_offline() {
     let mut harness = CliTestHarness::new("e2e_cli_packages_install_list_remove_offline");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
 
     harness.harness.section("install local (project)");
     harness.harness.create_dir("local-pkg");
@@ -1849,6 +3195,9 @@ fn e2e_cli_packages_install_list_remove_offline() {
 fn e2e_cli_packages_update_respects_pinning_offline() {
     let mut harness = CliTestHarness::new("e2e_cli_packages_update_respects_pinning_offline");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
 
     let git = |cwd: &Path, args: &[&str]| -> String {
         let output = Command::new("git")
@@ -1973,6 +3322,9 @@ fn e2e_cli_extensions_install_update_manifest_resolution_offline() {
     let mut harness =
         CliTestHarness::new("e2e_cli_extensions_install_update_manifest_resolution_offline");
     harness.env.remove("PI_CONFIG_PATH");
+    harness
+        .env
+        .insert("PI_WORKSPACE_TRUST".to_string(), "trusted".to_string());
 
     let write_extension_package = |root: &Path,
                                    package_name: &str,
@@ -2282,6 +3634,9 @@ fn e2e_interactive_smoke_tmux() {
         "--no-prompt-templates",
         "--no-extensions",
         "--no-themes",
+        // This test drives the classic charmed stack (its welcome banner and
+        // pane layout); the default FTUI stack is covered by tests/e2e_ftui.rs.
+        "--classic",
         "--system-prompt",
         "pi e2e interactive smoke test",
     ];
@@ -2714,12 +4069,37 @@ fn setup_vcr_anthropic(
     setup_vcr_anthropic_with_chunks(harness, cassette_name, request_body, &chunks);
 }
 
+use common::apply_prompt_cache_wire_shape;
+
 fn setup_vcr_anthropic_with_chunks(
     harness: &mut CliTestHarness,
     cassette_name: &str,
     request_body: &serde_json::Value,
     chunks: &[String],
 ) {
+    setup_vcr_anthropic_response(
+        harness,
+        cassette_name,
+        request_body,
+        200,
+        "text/event-stream; charset=utf-8",
+        chunks,
+    );
+}
+
+/// Cassette with an arbitrary response status/content type, for replaying a
+/// provider failure (e.g. a 401 for a bad key) without touching the network.
+fn setup_vcr_anthropic_response(
+    harness: &mut CliTestHarness,
+    cassette_name: &str,
+    request_body: &serde_json::Value,
+    status: u16,
+    content_type: &str,
+    chunks: &[String],
+) {
+    let mut request_body = request_body.clone();
+    apply_prompt_cache_wire_shape(&mut request_body);
+    let request_body = &request_body;
     let cassette_dir = harness.harness.temp_path("vcr-cassettes");
     fs::create_dir_all(&cassette_dir).expect("create cassette dir");
     let cassette = json!({
@@ -2740,14 +4120,19 @@ fn setup_vcr_anthropic_with_chunks(
                 "body": request_body
             },
             "response": {
-                "status": 200,
+                "status": status,
                 "headers": [
-                    ["Content-Type", "text/event-stream; charset=utf-8"]
+                    ["Content-Type", content_type]
                 ],
                 "body_chunks": chunks
             }
         }]
     });
+    // Store the request as a recording would: redacted. Playback redacts the
+    // incoming body before matching, so an unredacted template never matches a
+    // tool schema with a sensitive-looking property such as edit's `token`.
+    let mut cassette: pi::vcr::Cassette = serde_json::from_value(cassette).expect("cassette shape");
+    pi::vcr::redact_cassette(&mut cassette);
 
     let cassette_path = cassette_dir.join(format!("{cassette_name}.json"));
     fs::write(
@@ -2804,21 +4189,48 @@ fn expected_system_prompt(custom: &str) -> String {
 }
 
 fn expected_anthropic_tools(enabled: &[&str]) -> Vec<serde_json::Value> {
+    fn tool_json(tool: &dyn pi::tools::Tool) -> serde_json::Value {
+        json!({
+            "name": tool.name(),
+            "description": tool.description(),
+            "input_schema": tool.parameters(),
+        })
+    }
+
     let cwd = Path::new(".");
     let config = Config::default();
     let tools = ToolRegistry::new(enabled, cwd, Some(&config));
 
-    tools
+    // The provider request only carries the live schema: discoverable-tier
+    // tools are hidden behind the xdev dispatcher until promoted
+    // (bd-cv653.1.6), mirroring the filter in Agent's request build.
+    let mut defs: Vec<serde_json::Value> = tools
         .tools()
         .iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name(),
-                "description": tool.description(),
-                "input_schema": tool.parameters(),
-            })
-        })
-        .collect()
+        .filter(|tool| !tools.is_discoverable(tool.name()))
+        .map(|tool| tool_json(tool.as_ref()))
+        .collect();
+
+    // Session-coupled tools join via extend_tools in main.rs, in this
+    // order: todo (when enabled), submit_plan (always registered — it
+    // self-errors outside plan mode), ask (when enabled).
+    if enabled.contains(&"todo") {
+        let session = Arc::new(asupersync::sync::Mutex::new(
+            pi::session::Session::in_memory(),
+        ));
+        defs.push(tool_json(&pi::todo::TodoTool::new(session)));
+    }
+    defs.push(tool_json(&pi::plan::SubmitPlanTool::new(
+        pi::plan::PlanState::new(),
+        false,
+    )));
+    if enabled.contains(&"ask") {
+        defs.push(tool_json(&pi::ask::AskTool::new(
+            pi::ask::AskPolicy::from_config(None),
+        )));
+    }
+
+    defs
 }
 
 fn log_tool_scenario_setup(
@@ -2871,7 +4283,7 @@ fn e2e_cli_print_mode_vcr_roundtrip() {
             {"role": "user", "content": [{"type": "text", "text": "Reply with the single word: pong."}]}
         ],
         "system": expected_system_prompt("You are a test harness model."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -2934,7 +4346,7 @@ fn e2e_cli_print_mode_stdin_sends_to_provider() {
             {"role": "user", "content": [{"type": "text", "text": "Hello from stdin pipe content."}]}
         ],
         "system": expected_system_prompt("Echo test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -2999,6 +4411,325 @@ fn collect_json_mode_text_deltas(lines: &[serde_json::Value]) -> Vec<String> {
                 .map(ToOwned::to_owned)
         })
         .collect()
+}
+
+fn prewalk_stream_response(tool_path: Option<&str>) -> MockHttpResponse {
+    let delta = tool_path.map_or_else(
+        || json!({"role": "assistant", "content": "Prewalk destination finished."}),
+        |path| {
+            json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0, "id": format!("write-{path}"), "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": json!({"path": path, "content": "one completed edit"}).to_string()
+                    }
+                }]
+            })
+        },
+    );
+    let start = json!({
+        "id": "prewalk-completion", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
+    });
+    let end = json!({
+        "id": "prewalk-completion",
+        "choices": [{"index": 0, "delta": {},
+            "finish_reason": if tool_path.is_some() { "tool_calls" } else { "stop" }}]
+    });
+    MockHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: format!("data: {start}\n\ndata: {end}\n\ndata: [DONE]\n\n").into_bytes(),
+    }
+}
+
+fn configure_prewalk_cli(
+    harness: &CliTestHarness,
+    destination: Vec<MockHttpResponse>,
+    retries: u32,
+) -> MockHttpServer {
+    let server = harness.harness.start_mock_http_server();
+    server.add_route_queue(
+        "POST",
+        "/source/v1/chat/completions",
+        vec![prewalk_stream_response(Some("first-edit.txt"))],
+    );
+    server.add_route_queue("POST", "/target/v1/chat/completions", destination);
+    let agent_dir = PathBuf::from(&harness.env["PI_CODING_AGENT_DIR"]);
+    fs::create_dir_all(&agent_dir).expect("create isolated prewalk configuration");
+    fs::write(agent_dir.join("auth.json"), b"{}").expect("write isolated auth store");
+    fs::write(
+        agent_dir.join("models.json"),
+        serde_json::to_vec(&json!({"providers": {
+            "prewalk-source": {
+                "api": "openai-completions",
+                "baseUrl": format!("{}/source/v1", server.base_url()),
+                "apiKey": "source-fixture-key", "authHeader": true,
+                "models": [{"id": "source", "reasoning": false,
+                    "contextWindow": 32_000, "maxTokens": 512}]
+            },
+            "prewalk-target": {
+                "api": "openai-completions",
+                "baseUrl": format!("{}/target/v1", server.base_url()),
+                "apiKey": "target-fixture-key", "authHeader": true,
+                "models": [{"id": "target", "reasoning": false,
+                    "contextWindow": 64_000, "maxTokens": 256}]
+            }
+        }}))
+        .unwrap(),
+    )
+    .expect("write prewalk models");
+    fs::write(
+        &harness.env["PI_CONFIG_PATH"],
+        serde_json::to_vec(&json!({
+            "defaultProvider": "prewalk-source", "defaultModel": "source",
+            "compaction": {"enabled": false},
+            "retry": {"enabled": retries > 0, "maxRetries": retries,
+                "baseDelayMs": 0, "maxDelayMs": 0}
+        }))
+        .unwrap(),
+    )
+    .expect("write prewalk settings");
+    server
+}
+
+fn run_prewalk_cli(
+    harness: &CliTestHarness,
+    mode: &str,
+    tool_limit: &str,
+    into: Option<&str>,
+) -> CliResult {
+    let mut args = vec![
+        "--mode",
+        mode,
+        // Print and RPC runs have no approval surface, so the default
+        // always-ask mode denies the edit and nothing arms the handoff.
+        "--approval-mode",
+        "write",
+        "--tools",
+        "read,write",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-context-files",
+        "--session",
+        "prewalk-session.jsonl",
+        "--max-tool-iterations",
+        tool_limit,
+    ];
+    if let Some(into) = into {
+        args.extend(["--prewalk-into", into]);
+    } else {
+        args.push("--prewalk");
+    }
+    if mode == "rpc" {
+        harness.run_with_stdin(
+            &args,
+            Some(b"{\"id\":\"prewalk\",\"type\":\"prompt\",\"message\":\"Complete this prewalk task.\"}\n"),
+        )
+    } else {
+        args.extend(["--print", "Complete this prewalk task."]);
+        harness.run(&args)
+    }
+}
+
+fn assert_prewalk_cli_transcript(
+    harness: &CliTestHarness,
+    server: &MockHttpServer,
+    requests: usize,
+) {
+    let captured = server.requests();
+    assert_eq!(
+        captured.len(),
+        requests,
+        "exact native provider admission count"
+    );
+    assert_eq!(captured[0].path, "/source/v1/chat/completions");
+    for request in &captured[1..] {
+        assert_eq!(request.path, "/target/v1/chat/completions");
+        assert!(request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization") && value == "Bearer target-fixture-key"
+        }));
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["model"], "target");
+        let messages = body["messages"].as_array().expect("destination transcript");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .count(),
+            1,
+            "completed source edit must appear once in every destination attempt"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| {
+                    message["role"] == "user"
+                        && message.to_string().contains("Complete this prewalk task.")
+                })
+                .count(),
+            1,
+            "continuation must not replay the authored prompt"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(harness.harness.temp_path("first-edit.txt")).unwrap(),
+        "one completed edit"
+    );
+    let saved = fs::read_to_string(harness.harness.temp_path("prewalk-session.jsonl")).unwrap();
+    let entries = parse_json_mode_stdout_lines(&saved);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["message"]["role"] == "toolResult")
+            .count(),
+        1,
+        "the native edit result must be durably recorded exactly once"
+    );
+    assert!(entries.iter().any(|entry| {
+        entry["type"] == "model_change"
+            && entry["provider"] == "prewalk-target"
+            && entry["modelId"] == "target"
+    }));
+}
+
+#[test]
+fn e2e_cli_print_prewalk_continues_even_with_retries_disabled() {
+    for mode in ["text", "json"] {
+        let harness = CliTestHarness::new(&format!("print_prewalk_{mode}"));
+        let server = configure_prewalk_cli(&harness, vec![prewalk_stream_response(None)], 0);
+        let result = run_prewalk_cli(&harness, mode, "8", Some("prewalk-target/target:off"));
+        assert_exit_code(&harness.harness, &result, 0);
+        assert_contains(
+            &harness.harness,
+            &result.stdout,
+            "Prewalk destination finished.",
+        );
+        assert_prewalk_cli_transcript(&harness, &server, 2);
+        if mode == "json" {
+            let events = parse_json_mode_stdout_lines(&result.stdout);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "prewalk_switched")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn e2e_cli_rpc_prewalk_retries_the_destination_without_replaying_tools() {
+    let harness = CliTestHarness::new("rpc_prewalk_retry");
+    let server = configure_prewalk_cli(
+        &harness,
+        vec![
+            MockHttpResponse::json(
+                503,
+                &json!({"error": {
+                    "message": "fixture unavailable", "type": "server_error"
+                }}),
+            ),
+            prewalk_stream_response(None),
+        ],
+        1,
+    );
+    let result = run_prewalk_cli(&harness, "rpc", "8", Some("prewalk-target/target:off"));
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_prewalk_cli_transcript(&harness, &server, 3);
+    let events = parse_json_mode_stdout_lines(&result.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "prewalk_switched")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "agent_end")
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "auto_retry_end" && event["success"] == true)
+    );
+    assert_eq!(events.last().unwrap()["type"], "agent_end");
+    // A successful RPC turn ends with `"error": null`, as in e2e_failover.
+    assert!(
+        events.last().unwrap()["error"].is_null(),
+        "{}",
+        events.last().unwrap()
+    );
+}
+
+#[test]
+fn e2e_cli_prewalk_preserves_the_original_tool_iteration_limit() {
+    for mode in ["json", "rpc"] {
+        let harness = CliTestHarness::new(&format!("prewalk_tool_budget_{mode}"));
+        let server = configure_prewalk_cli(
+            &harness,
+            vec![prewalk_stream_response(Some("must-not-execute.txt"))],
+            0,
+        );
+        let result = run_prewalk_cli(&harness, mode, "1", Some("prewalk-target/target:off"));
+        assert_prewalk_cli_transcript(&harness, &server, 2);
+        assert!(!harness.harness.temp_path("must-not-execute.txt").exists());
+        let events = parse_json_mode_stdout_lines(&result.stdout);
+        assert!(events.iter().any(|event| {
+            event
+                .to_string()
+                .contains("Maximum tool iterations (1) exceeded")
+        }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "tool_execution_end")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn e2e_cli_prewalk_into_settings_and_launch_overrides_reach_native_drivers() {
+    for mode in ["text", "json", "rpc"] {
+        for explicit in [false, true] {
+            let harness = CliTestHarness::new(&format!("prewalk_config_{mode}_{explicit}"));
+            let server = configure_prewalk_cli(&harness, vec![prewalk_stream_response(None)], 0);
+            let settings_path = &harness.env["PI_CONFIG_PATH"];
+            let mut settings: Value =
+                serde_json::from_slice(&fs::read(settings_path).unwrap()).unwrap();
+            settings["prewalk"] = json!({
+                "enabled": false,
+                // from is for restart; startup must not resolve or select it.
+                "from": "unregistered/planner",
+                "into": if explicit { "unregistered/target" } else { "prewalk-target/target:off" }
+            });
+            settings["modelRoles"] = json!({"smol": "prewalk-source/source"});
+            fs::write(settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+            let result = run_prewalk_cli(
+                &harness,
+                mode,
+                "8",
+                explicit.then_some("prewalk-target/target:off"),
+            );
+            assert_exit_code(&harness.harness, &result, 0);
+            assert_prewalk_cli_transcript(&harness, &server, 2);
+            let after: Value = serde_json::from_slice(&fs::read(settings_path).unwrap()).unwrap();
+            assert_eq!(
+                after, settings,
+                "launch selectors must not rewrite configuration"
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3166,7 +4897,7 @@ fn e2e_cli_json_mode_print_flag_emits_header_and_events() {
             {"role": "user", "content": [{"type": "text", "text": "Reply with JSON mode pong."}]}
         ],
         "system": expected_system_prompt("JSON mode event stream test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3216,7 +4947,7 @@ fn e2e_cli_json_mode_fragmented_sse_chunks_preserve_delta_text() {
             {"role": "user", "content": [{"type": "text", "text": "Handle fragmented SSE frames."}]}
         ],
         "system": expected_system_prompt("JSON mode fragmented SSE test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
     let chunks = build_anthropic_response_chunks_from_parts(&response_parts);
@@ -3273,7 +5004,7 @@ fn e2e_cli_json_mode_high_volume_stream_preserves_event_count_and_order() {
             {"role": "user", "content": [{"type": "text", "text": "Stream a lot of tiny JSON mode deltas."}]}
         ],
         "system": expected_system_prompt("JSON mode throughput regression test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
     let chunks = build_anthropic_response_chunks_from_parts(&part_refs);
@@ -3326,7 +5057,7 @@ fn e2e_cli_json_mode_stdin_emits_header_and_events() {
             {"role": "user", "content": [{"type": "text", "text": "JSON stdin body"}]}
         ],
         "system": expected_system_prompt("JSON stdin test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3405,6 +5136,203 @@ fn e2e_cli_json_mode_missing_api_key_fails_startup() {
     let result = harness.run(&args);
     assert_exit_code(&harness.harness, &result, 1);
     assert_contains(&harness.harness, &result.stderr, "No API key");
+
+    // gh #217: exactly one machine-readable record on stdout, nothing else.
+    let record = assert_single_fatal_error_record(&harness.harness, &result, "startup");
+    assert_eq!(record["code"], "auth.missing_api_key", "{record}");
+    assert!(
+        record["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("No API key")),
+        "{record}"
+    );
+}
+
+/// gh #217: parse stdout as exactly one `{"type":"error",…}` record and
+/// check the contract fields against the process exit code.
+fn assert_single_fatal_error_record(
+    harness: &TestHarness,
+    result: &CliResult,
+    expected_phase: &str,
+) -> serde_json::Value {
+    harness.assert_log("assert single fatal error record on stdout");
+    let lines = parse_json_mode_stdout_lines(&result.stdout);
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stdout record, got {}:\n{}",
+        lines.len(),
+        result.stdout
+    );
+    let record = lines.into_iter().next().expect("one record");
+    assert_eq!(record["type"], "error", "{record}");
+    assert_eq!(record["phase"], expected_phase, "{record}");
+    assert!(
+        record["code"].as_str().is_some_and(|code| !code.is_empty()),
+        "{record}"
+    );
+    assert!(
+        record["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "{record}"
+    );
+    assert_eq!(
+        record["exit_code"].as_i64(),
+        Some(i64::from(result.exit_code)),
+        "record exit_code must match the process exit code: {record}"
+    );
+    let mut keys = record
+        .as_object()
+        .expect("record object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(keys, ["code", "exit_code", "message", "phase", "type"]);
+    record
+}
+
+/// gh #217: the same record reaches an RPC host, since the loop never opened.
+#[test]
+fn e2e_cli_rpc_mode_missing_api_key_emits_startup_error_record() {
+    let harness =
+        CliTestHarness::new("e2e_cli_rpc_mode_missing_api_key_emits_startup_error_record");
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "rpc",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+
+    let result = harness.run_with_stdin(&args, Some(b""));
+    assert_exit_code(&harness.harness, &result, 1);
+    let record = assert_single_fatal_error_record(&harness.harness, &result, "startup");
+    assert_eq!(record["code"], "auth.missing_api_key", "{record}");
+}
+
+/// gh #217: a usage error is a `usage` record with exit code 2.
+#[test]
+fn e2e_cli_json_mode_usage_error_emits_startup_error_record() {
+    let harness = CliTestHarness::new("e2e_cli_json_mode_usage_error_emits_startup_error_record");
+
+    // `--api-key` without a model is rejected before any startup work.
+    let mut args: Vec<&str> = vec!["--mode", "json", "--api-key", "k"];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+    args.push("hello");
+    let result = harness.run(&args);
+    assert_exit_code(&harness.harness, &result, 2);
+    let record = assert_single_fatal_error_record(&harness.harness, &result, "startup");
+    assert_eq!(record["code"], "usage", "{record}");
+    assert_eq!(record["exit_code"], 2, "{record}");
+}
+
+/// gh #217: the report's shape — read-only `~/.pi`, key on argv — no longer
+/// fails at startup (the store degrades), so the run reaches the provider;
+/// when that provider rejects the key, the JSON stream ends with a single
+/// `phase: "run"` record carrying the auth diagnostic code, after the
+/// regular lifecycle events, and the exit code is non-zero.
+#[cfg(unix)]
+#[test]
+fn e2e_cli_json_mode_read_only_state_dir_and_bad_api_key_emit_run_error_record() {
+    if running_as_root() {
+        eprintln!("skipping: a read-only directory is writable by root");
+        return;
+    }
+    let mut harness = CliTestHarness::new(
+        "e2e_cli_json_mode_read_only_state_dir_and_bad_api_key_emit_run_error_record",
+    );
+
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+        ],
+        "system": expected_system_prompt("Bad key test."),
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
+        "stream": true
+    });
+    setup_vcr_anthropic_response(
+        &mut harness,
+        "e2e_json_mode_bad_api_key",
+        &request_body,
+        401,
+        "application/json",
+        &[r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#
+            .to_string()],
+    );
+
+    // A read-only parent whose `agent` / `sessions` children do not exist yet.
+    let readonly_root = harness.harness.temp_path("readonly-home");
+    fs::create_dir_all(&readonly_root).expect("create readonly root");
+    let mut perms = fs::metadata(&readonly_root)
+        .expect("stat readonly root")
+        .permissions();
+    perms.set_mode(0o500);
+    fs::set_permissions(&readonly_root, perms).expect("set readonly perms");
+    harness.env.insert(
+        "PI_CODING_AGENT_DIR".to_string(),
+        readonly_root.join("agent").display().to_string(),
+    );
+    harness.env.insert(
+        "PI_SESSIONS_DIR".to_string(),
+        readonly_root.join("sessions").display().to_string(),
+    );
+
+    let mut args: Vec<&str> = vec![
+        "--mode",
+        "json",
+        "-p",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--api-key",
+        "test-vcr-key",
+    ];
+    args.extend_from_slice(PRINT_MODE_ISOLATION_FLAGS);
+    args.extend_from_slice(&["--system-prompt", "Bad key test.", "hello"]);
+
+    let result = harness.run(&args);
+    harness
+        .harness
+        .log()
+        .info_ctx("verify", "read-only state dir + bad key", |ctx| {
+            ctx.push(("exit_code".into(), result.exit_code.to_string()));
+            ctx.push(("stdout".into(), result.stdout.clone()));
+            ctx.push(("stderr".into(), result.stderr.clone()));
+        });
+    assert_exit_code(&harness.harness, &result, 1);
+
+    let lines = parse_json_mode_stdout_lines(&result.stdout);
+    assert!(
+        lines.len() > 1,
+        "startup must succeed with a read-only state dir: {}",
+        result.stdout
+    );
+    assert_eq!(lines[0]["type"], "session", "{}", result.stdout);
+    let error_record_count = lines.iter().filter(|line| line["type"] == "error").count();
+    assert_eq!(
+        error_record_count, 1,
+        "exactly one fatal record: {}",
+        result.stdout
+    );
+    let record = lines.last().expect("last line");
+    assert_eq!(
+        record["type"], "error",
+        "record is the final line: {record}"
+    );
+    assert_eq!(record["phase"], "run", "{record}");
+    assert_eq!(record["code"], "auth.invalid_api_key", "{record}");
+    assert_eq!(record["exit_code"], 1, "{record}");
+    assert!(
+        record["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("401")),
+        "{record}"
+    );
 }
 
 #[test]
@@ -3437,7 +5365,7 @@ fn e2e_cli_print_mode_file_ref_reads_file() {
             {"role": "user", "content": [{"type": "text", "text": user_text}]}
         ],
         "system": expected_system_prompt("File test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3504,7 +5432,7 @@ fn e2e_cli_no_tools_omits_tool_definitions() {
             {"role": "user", "content": [{"type": "text", "text": "Say ok."}]}
         ],
         "system": expected_system_prompt(system_prompt),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3548,6 +5476,149 @@ fn e2e_cli_no_tools_omits_tool_definitions() {
     assert_contains(&harness.harness, &result.stdout, "ok");
 }
 
+#[test]
+fn e2e_cli_print_mcp_honors_project_discovery_setting() {
+    let harness = CliTestHarness::new("e2e_cli_print_mcp_project_setting");
+    let global = PathBuf::from(&harness.env["PI_CODING_AGENT_DIR"]);
+    fs::create_dir_all(&global).expect("global MCP directory");
+    fs::write(
+        global.join("mcp.json"),
+        r#"{"mcpServers":{"shared":{"url":"https://global.example.test/mcp"}}}"#,
+    )
+    .expect("global MCP definition");
+    harness.harness.create_file(
+        ".pi/mcp.json",
+        br#"{"mcpServers":{"shared":{"url":"https://project.example.test/mcp"},"project-only":{"command":"project-bin"}}}"#,
+    );
+    let explicit = harness.harness.create_file(
+        "explicit-mcp.json",
+        br#"{"mcpServers":{"explicit":{"command":"explicit-bin"}}}"#,
+    );
+    let settings = PathBuf::from(&harness.env["PI_CONFIG_PATH"]);
+    for (enabled, expected_provenance, expected_names) in [
+        (false, "global", vec!["explicit", "shared"]),
+        (true, ".pi", vec!["explicit", "project-only", "shared"]),
+    ] {
+        fs::write(
+            &settings,
+            json!({"mcp":{"enableProjectConfig":enabled}}).to_string(),
+        )
+        .expect("MCP discovery setting");
+        let result = harness.run(&[
+            "--trust",
+            "-p",
+            "--mode",
+            "json",
+            "--mcp-config",
+            explicit.to_str().expect("explicit path"),
+            "/mcp list",
+        ]);
+        assert_eq!(result.exit_code, 0, "{}\n{}", result.stdout, result.stderr);
+        let record = result
+            .stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|record| record["type"] == "mcp_result")
+            .expect("MCP command result");
+        assert_eq!(record["success"], true);
+        let servers = record["data"]["servers"].as_array().expect("server list");
+        let mut names = servers
+            .iter()
+            .map(|server| server["name"].as_str().expect("name"))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, expected_names);
+        let shared = servers
+            .iter()
+            .find(|server| server["name"] == "shared")
+            .expect("shared server");
+        assert_eq!(shared["provenance"], expected_provenance);
+    }
+}
+
+/// A process isolation flag must also skip already acknowledged MCP servers
+/// and command-based credential resolvers, not merely hide their tool names.
+#[cfg(unix)]
+#[test]
+fn e2e_cli_no_mcp_skips_acknowledged_servers_and_credentials() {
+    let mut harness =
+        CliTestHarness::new("e2e_cli_no_mcp_skips_acknowledged_servers_and_credentials");
+    let cwd = harness.harness.temp_dir().to_path_buf();
+    let global = PathBuf::from(&harness.env["PI_CODING_AGENT_DIR"]);
+    fs::create_dir_all(&global).expect("global MCP directory");
+    let server_marker = harness.harness.temp_path("mcp-server-started");
+    let credential_marker = harness.harness.temp_path("mcp-credential-resolved");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    fs::write(
+        global.join("mcp.json"),
+        json!({
+            "mcpServers": {
+                "isolation-fixture": {
+                    "command": "/bin/sh",
+                    "args": ["-c", format!("printf started > {}; exit 1", quote(&server_marker))],
+                    "env": {
+                        "TOKEN": format!(
+                            "$CMD:printf resolved > {}; printf fixture-token",
+                            quote(&credential_marker)
+                        )
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write MCP fixture");
+    let discovery = pi::mcp::config::discover(&cwd, &global, &[], true);
+    assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+    let server = discovery.servers.first().expect("discover fixture");
+    pi::mcp::TrustStore::load(&global.join("mcp-trust.json"))
+        .expect("load MCP trust")
+        .acknowledge(
+            &server.name,
+            &server.fingerprint(&cwd),
+            "CLI isolation test",
+        )
+        .expect("acknowledge fixture without executing it");
+
+    let system_prompt = "Test MCP isolation.";
+    let request_body = json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Say ok."}]}
+        ],
+        "system": expected_system_prompt(system_prompt),
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
+        "stream": true
+    });
+    setup_vcr_anthropic(&mut harness, "e2e_no_mcp", &request_body, "ok");
+    let result = harness.run(&[
+        "-p",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--no-tools",
+        "--no-mcp",
+        "--no-extensions",
+        "--no-skills",
+        "--no-context-files",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--thinking",
+        "off",
+        "--system-prompt",
+        system_prompt,
+        "Say ok.",
+    ]);
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_contains(&harness.harness, &result.stdout, "ok");
+    assert!(!server_marker.exists(), "disabled MCP server was started");
+    assert!(
+        !credential_marker.exists(),
+        "disabled MCP credential command was resolved"
+    );
+}
+
 /// `--tools read,grep` enables only read and grep tools.
 /// The VCR cassette expects a request with exactly those two tool definitions.
 #[test]
@@ -3563,7 +5634,7 @@ fn e2e_cli_specific_tools_enables_subset() {
         ],
         "system": expected_system_prompt(system_prompt),
         "tools": expected_anthropic_tools(&expected_tools),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3613,16 +5684,10 @@ fn e2e_cli_specific_tools_enables_subset() {
 fn e2e_cli_default_tools_when_no_flag() {
     let mut harness = CliTestHarness::new("e2e_cli_default_tools_when_no_flag");
     let system_prompt = "Test default tools.";
-    let expected_tools = [
-        "read",
-        "bash",
-        "edit",
-        "write",
-        "grep",
-        "find",
-        "ls",
-        "hashline_edit",
-    ];
+    // The default enabled set (pi::xdev::default_enabled_tools) now includes
+    // the discoverable tier (ast_grep, lsp, jobs, hub, ...); the helper
+    // filters those down to the live schema the request actually carries.
+    let expected_tools = pi::xdev::default_enabled_tools();
 
     let request_body = json!({
         "model": "claude-sonnet-4-5",
@@ -3631,7 +5696,7 @@ fn e2e_cli_default_tools_when_no_flag() {
         ],
         "system": expected_system_prompt(system_prompt),
         "tools": expected_anthropic_tools(&expected_tools),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -3718,6 +5783,12 @@ fn e2e_cli_missing_api_key_error() {
             || stderr_lower.contains("anthropic_api_key"),
         "expected stderr to mention API key/auth issue, got:\n{}",
         result.stderr,
+    );
+    // gh #217: the machine-readable record is gated on --mode json/rpc.
+    assert!(
+        result.stdout.trim().is_empty(),
+        "text mode must not print a fatal-error record on stdout, got:\n{}",
+        result.stdout
     );
 }
 
@@ -3958,7 +6029,7 @@ fn e2e_cli_no_tools_handles_tool_use_response_gracefully() {
             {"role": "user", "content": [{"type": "text", "text": "Read a file for me."}]}
         ],
         "system": expected_system_prompt("Test no-tools graceful."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
 
@@ -4006,6 +6077,623 @@ fn e2e_cli_no_tools_handles_tool_use_response_gracefully() {
         result.stdout,
     );
     assert_contains(&harness.harness, &result.stdout, "none are available");
+}
+
+/// SSE frames for an Anthropic response that calls one tool and stops with
+/// `stop_reason: "tool_use"`.
+fn build_anthropic_tool_use_chunks(tool_name: &str, tool_input: &serde_json::Value) -> Vec<String> {
+    build_anthropic_tool_use_chunks_with_id("toolu_mock_approval_001", tool_name, tool_input)
+}
+
+fn build_anthropic_tool_use_chunks_with_id(
+    tool_id: &str,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Vec<String> {
+    let message_start = json!({
+        "type": "message_start",
+        "message": {
+            "model": "claude-sonnet-4-5",
+            "id": "msg_mock_tool_use_001",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "stop_reason": null,
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 1,
+                "service_tier": "standard"
+            }
+        }
+    });
+    let content_start = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": tool_id,
+            "name": tool_name,
+            "input": {}
+        }
+    });
+    let content_delta = json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": serde_json::to_string(tool_input).expect("serialize tool input")
+        }
+    });
+    let message_delta = json!({
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+        "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 5
+        }
+    });
+
+    vec![
+        format!("event: message_start\ndata: {message_start}\n\n"),
+        format!("event: content_block_start\ndata: {content_start}\n\n"),
+        format!("event: content_block_delta\ndata: {content_delta}\n\n"),
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            .to_string(),
+        format!("event: message_delta\ndata: {message_delta}\n\n"),
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+    ]
+}
+
+/// Cassette with several interactions replayed in order.
+///
+/// Request bodies are matched as templates (extra incoming keys are fine), so
+/// each entry only needs to pin the fields the test actually cares about.
+fn setup_vcr_anthropic_sequence(
+    harness: &mut CliTestHarness,
+    cassette_name: &str,
+    interactions: &[(serde_json::Value, Vec<String>)],
+) {
+    let cassette_dir = harness.harness.temp_path("vcr-cassettes");
+    fs::create_dir_all(&cassette_dir).expect("create cassette dir");
+    let recorded = interactions
+        .iter()
+        .map(|(request_body, chunks)| {
+            json!({
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.anthropic.com/v1/messages",
+                    "headers": [
+                        ["Content-Type", "application/json"],
+                        ["Accept", "text/event-stream"]
+                    ],
+                    "body": request_body
+                },
+                "response": {
+                    "status": 200,
+                    "headers": [["Content-Type", "text/event-stream; charset=utf-8"]],
+                    "body_chunks": chunks
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let cassette = json!({
+        "version": "1.0",
+        "test_name": cassette_name,
+        "recorded_at": "2026-09-09T00:00:00.000Z",
+        "interactions": recorded
+    });
+    let cassette_path = cassette_dir.join(format!("{cassette_name}.json"));
+    fs::write(
+        &cassette_path,
+        serde_json::to_string_pretty(&cassette).expect("serialize cassette"),
+    )
+    .expect("write cassette");
+
+    harness
+        .env
+        .insert("VCR_MODE".to_string(), "playback".to_string());
+    harness.env.insert(
+        "VCR_CASSETTE_DIR".to_string(),
+        cassette_dir.display().to_string(),
+    );
+    harness
+        .env
+        .insert("PI_VCR_TEST_NAME".to_string(), cassette_name.to_string());
+    harness
+        .env
+        .insert("ANTHROPIC_API_KEY".to_string(), "test-vcr-key".to_string());
+    harness
+        .env
+        .insert("PI_TEST_MODE".to_string(), "1".to_string());
+    harness
+        .env
+        .insert("VCR_DEBUG_BODY".to_string(), "1".to_string());
+}
+
+/// gh #224: print mode has no surface that can grant approval, and the
+/// approval mode defaults to `always-ask`. A gated tool call is therefore
+/// denied, and the run used to finish with exit 0 and a normal stop reason —
+/// a silent, total loss of tool use for any script that did not pass
+/// `--approval-mode yolo`. It must now fail loudly instead.
+///
+/// Mutation sensitivity: dropping the `surface_was_unavailable` check at the
+/// end of `run_print_mode` returns this to exit 0 and fails the assertion.
+#[test]
+fn e2e_print_mode_default_approval_denies_tools_and_fails_loudly() {
+    let mut harness =
+        CliTestHarness::new("e2e_print_mode_default_approval_denies_tools_and_fails_loudly");
+
+    let first = json!({"model": "claude-sonnet-4-5", "stream": true});
+    let second = json!({"model": "claude-sonnet-4-5", "stream": true});
+    setup_vcr_anthropic_sequence(
+        &mut harness,
+        "e2e_print_approval_surface_unavailable",
+        &[
+            (
+                first,
+                build_anthropic_tool_use_chunks("bash", &json!({"command": "echo hi"})),
+            ),
+            (
+                second,
+                build_anthropic_response_chunks("I could not run that command."),
+            ),
+        ],
+    );
+
+    // Deliberately NOT PRINT_MODE_ISOLATION_FLAGS: that list contains
+    // `--no-tools`, which would disable the very tool this test needs to have
+    // gated. Same isolation otherwise, minus the tool switch.
+    let result = harness.run(&[
+        "-p",
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--thinking",
+        "off",
+        "--tools",
+        "bash,ask",
+        "--system-prompt",
+        "You are a test harness model.",
+        "Run echo hi.",
+    ]);
+
+    harness
+        .harness
+        .log()
+        .info_ctx("verify", "approval surface unavailable", |ctx| {
+            ctx.push(("exit_code".into(), result.exit_code.to_string()));
+            ctx.push(("stderr".into(), result.stderr.clone()));
+            ctx.push(("stdout".into(), result.stdout.clone()));
+        });
+
+    assert_eq!(
+        result.exit_code, 3,
+        "a run whose tool calls were all denied for lack of an approval surface must exit 3, \
+         not 0.\nstderr:\n{}\nstdout:\n{}",
+        result.stderr, result.stdout
+    );
+    assert_contains_case_insensitive(&harness.harness, &result.stderr, "approval");
+    // The machine-readable record a JSON host reads instead of stderr prose.
+    let fatal = result
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value.get("type").and_then(|t| t.as_str()) == Some("error"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected one fatal-error record on stdout.\nstdout:\n{}",
+                result.stdout
+            )
+        });
+    assert_eq!(
+        fatal.get("code").and_then(|c| c.as_str()),
+        Some("approval.surface_unavailable"),
+        "fatal record must name the approval cause, got {fatal}"
+    );
+    assert_eq!(
+        fatal.get("exit_code").and_then(serde_json::Value::as_i64),
+        Some(3)
+    );
+}
+
+/// gh #224 control: the same run with `--yolo` auto-approves, so it must still
+/// exit 0. Without this, a fix that simply failed whenever a tool was gated
+/// would look correct.
+#[test]
+fn e2e_print_mode_yolo_approves_tools_and_exits_zero() {
+    let mut harness = CliTestHarness::new("e2e_print_mode_yolo_approves_tools_and_exits_zero");
+
+    setup_vcr_anthropic_sequence(
+        &mut harness,
+        "e2e_print_approval_yolo",
+        &[
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_tool_use_chunks("bash", &json!({"command": "echo hi"})),
+            ),
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_response_chunks("Done."),
+            ),
+        ],
+    );
+
+    // Same flag set as the failing case above, plus --yolo. See the comment
+    // there for why PRINT_MODE_ISOLATION_FLAGS is not used.
+    let result = harness.run(&[
+        "-p",
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--yolo",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--thinking",
+        "off",
+        "--tools",
+        "bash,ask",
+        "--system-prompt",
+        "You are a test harness model.",
+        "Run echo hi.",
+    ]);
+
+    assert_eq!(
+        result.exit_code, 0,
+        "an auto-approved run must still exit 0.\nstderr:\n{}\nstdout:\n{}",
+        result.stderr, result.stdout
+    );
+}
+
+#[cfg(unix)]
+fn print_background_args() -> Vec<&'static str> {
+    vec![
+        "-p",
+        "--mode",
+        "json",
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-sonnet-4-5",
+        "--yolo",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--thinking",
+        "off",
+        "--tools",
+        "bash,jobs",
+        "--system-prompt",
+        "You are a test harness model.",
+    ]
+}
+
+/// The real shell job cannot settle until the original AgentEnd has reached
+/// the caller. A successful third provider request therefore proves that
+/// print mode woke an idle session, not that its ordinary tool loop happened
+/// to notice a fast job before returning.
+#[test]
+#[cfg(unix)]
+fn e2e_cli_print_background_results_wake_only_when_enabled() {
+    for (name, flag, setting, wake_fails) in [
+        ("default", false, false, false),
+        ("flag", true, false, false),
+        ("setting", false, true, false),
+        ("failure", true, false, true),
+    ] {
+        let mut harness = CliTestHarness::new(&format!("print_background_{name}"));
+        fs::write(
+            harness.global_settings_path(),
+            serde_json::to_vec(&json!({
+                "retry": {"enabled": false},
+                "async": {"printWake": setting}
+            }))
+            .expect("settings"),
+        )
+        .expect("write settings");
+        setup_vcr_anthropic_sequence(
+            &mut harness,
+            &format!("print_background_{name}"),
+            &[
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    build_anthropic_tool_use_chunks(
+                        "bash",
+                        &json!({
+                            "command": "while [ ! -e release-job ]; do sleep 0.02; done; printf 'JOB_DONE_42\\n'",
+                            "background": true
+                        }),
+                    ),
+                ),
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    build_anthropic_response_chunks("JOB_STARTED"),
+                ),
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    if wake_fails {
+                        vec![
+                            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"background wake rejected\"}}\n\n".to_string(),
+                        ]
+                    } else {
+                        build_anthropic_response_chunks("FINAL_BACKGROUND_RESULT")
+                    },
+                ),
+            ],
+        );
+        let mut args = print_background_args();
+        if flag {
+            args.push("--wait-async");
+        }
+        args.extend([
+            "--max-time",
+            "30",
+            "Start a background job and report its result.",
+        ]);
+        let gate = harness.harness.temp_path("release-job");
+        let enabled = flag || setting;
+        let result = harness.run_with_stdout_observer(&args, None, move |line| {
+            if enabled
+                && serde_json::from_slice::<serde_json::Value>(line)
+                    .is_ok_and(|event| event["type"] == "agent_end")
+            {
+                fs::write(&gate, "continue").expect("release job after agent idle");
+            }
+        });
+        assert_exit_code(&harness.harness, &result, i32::from(wake_fails));
+        if wake_fails {
+            assert_contains(&harness.harness, &result.stderr, "background wake rejected");
+        }
+        let events = parse_json_mode_stdout_lines(&result.stdout);
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "agent_start")
+            .collect();
+        let ends = events
+            .iter()
+            .filter(|event| event["type"] == "agent_end")
+            .count();
+        assert_eq!(starts.len(), if enabled { 2 } else { 1 }, "{name}");
+        assert_eq!(ends, starts.len(), "balanced wake lifecycle: {name}");
+        assert!(
+            starts
+                .iter()
+                .all(|event| event["sessionId"] == events[0]["id"])
+        );
+        assert_eq!(
+            result.stdout.contains("FINAL_BACKGROUND_RESULT"),
+            enabled && !wake_fails
+        );
+        let notices = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "message_end"
+                    && event["message"]["role"] == "user"
+                    && event["message"]["content"].as_str().is_some_and(|text| {
+                        text.starts_with("[background job ") && text.contains("JOB_DONE_42")
+                    })
+            })
+            .count();
+        assert_eq!(
+            notices,
+            usize::from(enabled),
+            "notice delivered once: {name}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn e2e_cli_wait_async_waits_for_jobs_started_by_a_wake_turn() {
+    let mut harness = CliTestHarness::new("print_background_nested_wake");
+    fs::write(
+        harness.global_settings_path(),
+        r#"{"retry":{"enabled":false}}"#,
+    )
+    .expect("disable retries");
+    setup_vcr_anthropic_sequence(
+        &mut harness,
+        "print_background_nested_wake",
+        &[
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_tool_use_chunks(
+                    "bash",
+                    &json!({
+                        "command": "while [ ! -e release-first ]; do sleep 0.02; done; printf 'FIRST_DONE\\n'",
+                        "background": true
+                    }),
+                ),
+            ),
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_response_chunks("FIRST_STARTED"),
+            ),
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_tool_use_chunks_with_id(
+                    "toolu_background_second",
+                    "bash",
+                    &json!({
+                        "command": "while [ ! -e release-second ]; do sleep 0.02; done; printf 'SECOND_DONE\\n'",
+                        "background": true
+                    }),
+                ),
+            ),
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_response_chunks("SECOND_STARTED"),
+            ),
+            (
+                json!({"model": "claude-sonnet-4-5", "stream": true}),
+                build_anthropic_response_chunks("BOTH_JOBS_FINISHED"),
+            ),
+        ],
+    );
+    let mut args = print_background_args();
+    args.extend([
+        "--wait-async",
+        "--max-time",
+        "30",
+        "Run two dependent background jobs.",
+    ]);
+    let root = harness.harness.temp_dir().to_path_buf();
+    let mut completed_turns = 0;
+    let result = harness.run_with_stdout_observer(&args, None, move |line| {
+        if serde_json::from_slice::<serde_json::Value>(line)
+            .is_ok_and(|event| event["type"] == "agent_end")
+        {
+            completed_turns += 1;
+            let gate = match completed_turns {
+                1 => Some("release-first"),
+                2 => Some("release-second"),
+                _ => None,
+            };
+            if let Some(gate) = gate {
+                fs::write(root.join(gate), "continue").expect("release owned job");
+            }
+        }
+    });
+    assert_exit_code(&harness.harness, &result, 0);
+    assert_contains(&harness.harness, &result.stdout, "BOTH_JOBS_FINISHED");
+    let events = parse_json_mode_stdout_lines(&result.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "agent_start")
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "agent_end")
+            .count(),
+        3
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn e2e_cli_wait_async_deadline_fails_and_reaps_the_owned_job() {
+    for retry_backoff in [false, true] {
+        let name = if retry_backoff {
+            "print_background_deadline_initial_retry"
+        } else {
+            "print_background_deadline_idle"
+        };
+        let mut harness = CliTestHarness::new(name);
+        fs::write(
+            harness.global_settings_path(),
+            r#"{"retry":{"enabled":true,"maxRetries":1,"baseDelayMs":60000,"maxDelayMs":60000,"modelFallback":false}}"#,
+        )
+        .expect("configure long retry backoff");
+        let original_reply = if retry_backoff {
+            vec![
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"server error\"}}\n\n".to_string(),
+            ]
+        } else {
+            build_anthropic_response_chunks("JOB_STILL_RUNNING")
+        };
+        setup_vcr_anthropic_sequence(
+            &mut harness,
+            name,
+            &[
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    build_anthropic_tool_use_chunks(
+                        "bash",
+                        &json!({
+                            "command": "printf '%s' $$ > job.pid; while :; do sleep 1; done",
+                            "background": true
+                        }),
+                    ),
+                ),
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    original_reply,
+                ),
+                (
+                    json!({"model": "claude-sonnet-4-5", "stream": true}),
+                    build_anthropic_response_chunks("RETRY_MUST_NOT_START_AFTER_DEADLINE"),
+                ),
+            ],
+        );
+        let mut args = print_background_args();
+        args.extend(["--wait-async", "--max-time", "2", "Start a background job."]);
+        let result = harness.run(&args);
+        assert_exit_code(&harness.harness, &result, 1);
+        assert_contains(
+            &harness.harness,
+            &result.stderr,
+            "--max-time reached before background work settled",
+        );
+        assert!(
+            !result
+                .stdout
+                .contains("RETRY_MUST_NOT_START_AFTER_DEADLINE")
+        );
+        if retry_backoff {
+            let events = parse_json_mode_stdout_lines(&result.stdout);
+            let retry_start = events
+                .iter()
+                .find(|event| event["type"] == "auto_retry_start");
+            assert!(
+                retry_start.is_some(),
+                "original turn must reach retry backoff"
+            );
+            let retry_end = events
+                .iter()
+                .find(|event| event["type"] == "auto_retry_end");
+            assert!(retry_end.is_some_and(|event| event["success"] == false));
+        }
+        let pid = fs::read_to_string(harness.harness.temp_path("job.pid"))
+            .expect("background shell started")
+            .trim()
+            .parse::<u32>()
+            .expect("shell pid");
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!alive, "deadline left owned background shell {pid} running");
+    }
+}
+
+#[test]
+fn e2e_cli_wait_async_rejects_non_print_modes_before_provider_startup() {
+    for (mode, args) in [
+        ("rpc", vec!["--mode", "rpc", "--wait-async"]),
+        ("interactive", vec!["--wait-async"]),
+    ] {
+        let harness = CliTestHarness::new(&format!("wait_async_rejects_{mode}"));
+        let result = harness.run(&args);
+        assert_exit_code(&harness.harness, &result, 2);
+        assert_contains(
+            &harness.harness,
+            &result.stderr,
+            "--wait-async requires print mode",
+        );
+    }
 }
 
 // ============================================================================
@@ -4077,6 +6765,35 @@ fn write_rich_session(path: &Path, cwd: &Path) -> String {
     session_id.to_string()
 }
 
+fn write_identifiable_handoff_session(
+    path: &Path,
+    cwd: &Path,
+    session_id: &str,
+    timestamp: &str,
+    marker: &str,
+) {
+    let header = json!({
+        "type": "session",
+        "version": 3,
+        "id": session_id,
+        "timestamp": timestamp,
+        "cwd": cwd.display().to_string(),
+        "provider": "anthropic",
+        "modelId": "claude-sonnet-4-5"
+    });
+    let user_msg = json!({
+        "type": "message",
+        "id": format!("{session_id}-user"),
+        "timestamp": timestamp,
+        "message": {
+            "role": "user",
+            "content": marker
+        }
+    });
+
+    fs::write(path, format!("{header}\n{user_msg}\n")).expect("write handoff session jsonl");
+}
+
 /// Encode a CWD path into the session directory name format (mirrors `encode_cwd`
 /// from `src/session.rs`).
 #[cfg(unix)]
@@ -4085,6 +6802,80 @@ fn encode_cwd_for_test(path: &Path) -> String {
     let s = s.trim_start_matches(['/', '\\']).to_string();
     let s = s.replace(['/', '\\', ':'], "-");
     format!("--{s}--")
+}
+
+#[test]
+fn e2e_cli_handoff_defaults_to_newest_session_and_preserves_explicit_session() {
+    let harness = CliTestHarness::new(
+        "e2e_cli_handoff_defaults_to_newest_session_and_preserves_explicit_session",
+    );
+    let cwd = harness.harness.temp_dir();
+    let sessions_root = PathBuf::from(
+        harness
+            .env
+            .get("PI_SESSIONS_DIR")
+            .expect("PI_SESSIONS_DIR set"),
+    );
+    let project_sessions = sessions_root.join(encode_cwd(cwd));
+    fs::create_dir_all(&project_sessions).expect("create project sessions directory");
+
+    let older_id = "handoff-older-session";
+    let newer_id = "handoff-newer-session";
+    let older_marker = "HANDOFF_OLDER_SESSION_MARKER";
+    let newer_marker = "HANDOFF_NEWER_SESSION_MARKER";
+    let older_path = project_sessions.join("older.jsonl");
+    let newer_path = project_sessions.join("newer.jsonl");
+
+    write_identifiable_handoff_session(
+        &older_path,
+        cwd,
+        older_id,
+        "2026-02-04T10:00:00.000Z",
+        older_marker,
+    );
+    write_identifiable_handoff_session(
+        &newer_path,
+        cwd,
+        newer_id,
+        "2026-02-04T11:00:00.000Z",
+        newer_marker,
+    );
+    filetime::set_file_mtime(
+        &older_path,
+        filetime::FileTime::from_unix_time(1_700_000_000, 0),
+    )
+    .expect("set older session mtime");
+    filetime::set_file_mtime(
+        &newer_path,
+        filetime::FileTime::from_unix_time(1_800_000_000, 0),
+    )
+    .expect("set newer session mtime");
+
+    let index = pi::session_index::SessionIndex::for_sessions_root(&sessions_root);
+    index.reindex_all().expect("index handoff sessions");
+
+    let default_result = harness.run(&["handoff", "--print"]);
+    assert_exit_code(&harness.harness, &default_result, 0);
+    assert_contains(&harness.harness, &default_result.stdout, newer_id);
+    assert_contains(&harness.harness, &default_result.stdout, newer_marker);
+    assert!(
+        !default_result.stdout.contains(older_id) && !default_result.stdout.contains(older_marker),
+        "default handoff must not select the older session\nstdout:\n{}\nstderr:\n{}",
+        default_result.stdout,
+        default_result.stderr
+    );
+
+    let explicit_result = harness.run(&["handoff", "--session", older_id, "--print"]);
+    assert_exit_code(&harness.harness, &explicit_result, 0);
+    assert_contains(&harness.harness, &explicit_result.stdout, older_id);
+    assert_contains(&harness.harness, &explicit_result.stdout, older_marker);
+    assert!(
+        !explicit_result.stdout.contains(newer_id)
+            && !explicit_result.stdout.contains(newer_marker),
+        "explicit handoff must select the requested session\nstdout:\n{}\nstderr:\n{}",
+        explicit_result.stdout,
+        explicit_result.stderr
+    );
 }
 
 /// Test 1: Rich session export contains all entry types.
@@ -4241,7 +7032,7 @@ fn e2e_interactive_session_creates_valid_jsonl_tmux() {
             {"role": "user", "content": [{"type": "text", "text": "Say hello session test."}]}
         ],
         "system": expected_system_prompt("Session test."),
-        "max_tokens": 8192,
+        "max_tokens": VCR_CLAUDE_SONNET_MAX_TOKENS,
         "stream": true
     });
     setup_vcr_anthropic(
@@ -4295,6 +7086,9 @@ fn e2e_interactive_session_creates_valid_jsonl_tmux() {
         "--no-prompt-templates",
         "--no-extensions",
         "--no-themes",
+        // Classic charmed stack (pane-text assertions); FTUI is covered by
+        // tests/e2e_ftui.rs.
+        "--classic",
         "--thinking",
         "off",
         "--system-prompt",
@@ -4544,6 +7338,9 @@ fn e2e_interactive_session_continue_loads_previous_tmux() {
 
     let args = [
         "-c",
+        // Classic charmed stack (pane-text assertions); FTUI is covered by
+        // tests/e2e_ftui.rs.
+        "--classic",
         "--provider",
         "anthropic",
         "--model",
@@ -4757,7 +7554,7 @@ fn e2e_cli_startup_migrations_run_by_default() {
     fs::write(&legacy_session, format!("{legacy_session_header}\n")).expect("write legacy session");
     fs::write(
         agent_dir.join("oauth.json"),
-        r#"{"anthropic":{"access_token":"a","refresh_token":"r","expires":1}}"#,
+        r#"{"anthropic":{"access_token":"a","refresh_token":"r","expires":4102444800000}}"#,
     )
     .expect("write oauth.json");
     fs::write(

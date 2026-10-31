@@ -1,3 +1,8 @@
+// Examples are separate crates, so src/lib.rs's `recursion_limit` does not
+// reach here; asupersync 0.5.0 nests its runtime future types deeply enough
+// that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
+
 //! Debug wrapper for pi that traces each step of the `run()` sequence.
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
@@ -115,12 +120,15 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
         io::stdin().read_to_string(&mut data)?;
         if data.is_empty() { None } else { Some(data) }
     };
-    pi::app::apply_piped_stdin(&mut cli, stdin_content);
+    let piped_stdin = pi::app::apply_piped_stdin(&mut cli, stdin_content);
     pi::app::normalize_cli(&mut cli);
     step!("   CLI normalized");
 
     step!("7. Preparing initial message...");
     let mut messages: Vec<String> = cli.message_args().iter().map(ToString::to_string).collect();
+    if let Some(input) = piped_stdin {
+        messages.insert(0, input);
+    }
     let file_args: Vec<String> = cli.file_args().iter().map(ToString::to_string).collect();
     let initial = pi::app::prepare_initial_message(
         &cwd,
@@ -131,6 +139,7 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
             .as_ref()
             .and_then(|i| i.auto_resize)
             .unwrap_or(true),
+        &pi::workspace::WorkspaceHandle::default(),
     )?;
     step!(
         "   Initial message prepared: {:?}",
@@ -190,7 +199,7 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
 
     step!("11. Building agent...");
     let mut session = session;
-    pi::app::update_session_for_selection(&mut session, &selection);
+    pi::app::update_session_for_selection(&mut session, &selection, &model_registry);
     let enabled_tools = cli.enabled_tools();
     let skills_prompt = if enabled_tools.contains(&"read") {
         resources.format_skills_for_prompt()
@@ -211,6 +220,8 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
         &package_dir,
         test_mode,
         !cli.hide_cwd_in_prompt,
+        None,
+        &config,
     )?;
     let provider =
         providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;
@@ -222,6 +233,7 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
         tool_approval: None,
+        ..AgentConfig::default()
     };
     let tools = ToolRegistry::new(&enabled_tools, &cwd, Some(&config));
     let session_arc = Arc::new(Mutex::new(session));

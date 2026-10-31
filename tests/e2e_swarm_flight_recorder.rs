@@ -1,5 +1,12 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::too_many_lines)]
+// Integration tests are their own crates, so the crate-level
+// `recursion_limit` raised in src/lib.rs does not reach here. This file's
+// nested async blocks exceed the default 128 while the compiler proves `Send`
+// for the replayed session future (line ~898), which nightly-2026-08-31
+// reports as a `future_incompatible` warning and `-D warnings` makes fatal.
+// Same reasoning and same value as the library crate.
+#![recursion_limit = "256"]
 
 //! E2E: deterministic swarm flight-recorder replay harness.
 //!
@@ -121,6 +128,7 @@ impl FlightProvider {
                 ..Usage::default()
             },
             stop_reason,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -279,6 +287,7 @@ impl Provider for HangingStreamProvider {
             model: self.model_id().into(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         };
@@ -528,8 +537,16 @@ async fn run_flight_session(
             ..StreamOptions::default()
         },
         block_images: false,
+        model_accepts_images: true,
         fail_closed_hooks: true,
         tool_approval: None,
+        keyword_settings: None,
+        max_time: None,
+        cost_budget: None,
+        turn_recovery: pi::turn_recovery::TurnRecoveryMode::default(),
+        approval_state: None,
+        bash_settings: None,
+        secrets: None,
     };
     let agent = Agent::new(provider, tools, config);
     let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -661,8 +678,16 @@ async fn run_cancelled_pressure_session(
             ..StreamOptions::default()
         },
         block_images: false,
+        model_accepts_images: true,
         fail_closed_hooks: true,
         tool_approval: None,
+        keyword_settings: None,
+        max_time: None,
+        cost_budget: None,
+        turn_recovery: pi::turn_recovery::TurnRecoveryMode::default(),
+        approval_state: None,
+        bash_settings: None,
+        secrets: None,
     };
     let agent = Agent::new(provider, tools, config);
     let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1134,7 +1159,7 @@ fn multi_agent_flight_recorder_bundle_replays_without_credentials() {
         let recorder_a = Arc::clone(&recorder);
         let recorder_b = Arc::clone(&recorder);
         async move {
-            futures::future::join(
+            Box::pin(futures::future::join(
                 run_flight_session(
                     "agent-alpha".to_string(),
                     InputSource::Rpc,
@@ -1147,7 +1172,7 @@ fn multi_agent_flight_recorder_bundle_replays_without_credentials() {
                     beta_workspace,
                     recorder_b,
                 ),
-            )
+            ))
             .await
         }
     });

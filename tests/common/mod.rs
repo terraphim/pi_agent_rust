@@ -49,6 +49,44 @@ pub use logging::{
     redact_json_value, validate_jsonl, validate_jsonl_line,
 };
 
+/// Apply the prompt-cache wire shape (commits 1d817ab0/7bc8e6da) to a
+/// legacy-shaped Anthropic request body so recorded cassettes match what the
+/// provider now sends: `system` becomes a block array and the last user
+/// content block carries an ephemeral `cache_control` marker (as does the
+/// last tool definition, when tools are present).
+#[allow(dead_code)]
+pub fn apply_prompt_cache_wire_shape(body: &mut serde_json::Value) {
+    fn ephemeral() -> serde_json::Value {
+        serde_json::json!({"type": "ephemeral"})
+    }
+    if let Some(system) = body.get_mut("system")
+        && let Some(text) = system.as_str().map(ToString::to_string)
+    {
+        *system = serde_json::json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": ephemeral(),
+        }]);
+    }
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut())
+        && let Some(last_user) = messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.get("role").and_then(|r| r.as_str()) == Some("user"))
+        && let Some(blocks) = last_user.get_mut("content").and_then(|c| c.as_array_mut())
+        && let Some(last_block) = blocks.last_mut()
+        && let Some(block) = last_block.as_object_mut()
+    {
+        block.insert("cache_control".to_string(), ephemeral());
+    }
+    if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut())
+        && let Some(last_tool) = tools.last_mut()
+        && let Some(tool) = last_tool.as_object_mut()
+    {
+        tool.insert("cache_control".to_string(), ephemeral());
+    }
+}
+
 /// Seed interactive test configs so `PiApp::new()` stays hermetic.
 ///
 /// Startup changelog bootstrapping persists `lastChangelogVersion` on first run. Tests that use
@@ -61,6 +99,29 @@ pub fn hermetic_interactive_config(mut config: pi::config::Config) -> pi::config
     }
     config
 }
+
+/// Stack size for the shared test runtime's worker thread.
+///
+/// asupersync's builder defaults to 2 MiB per worker, which the SDK suites
+/// exceed: `sdk_unit` and `sdk_integration` both aborted with "thread
+/// 'asupersync-worker-0' has overflowed its stack" and exited on SIGABRT,
+/// reporting no pass/fail tally at all. The test bodies run on the worker
+/// thread rather than the main test thread, so they never see the 8 MiB the
+/// process stack would give them, and debug builds put much larger frames on it
+/// than release.
+///
+/// 16 MiB matches what this project already reserves for its other long-frame
+/// threads: `SQLITE_THREAD_STACK_BYTES` in `src/session_sqlite.rs` and
+/// `DRIVER_STACK_BYTES` in `src/interactive_ftui.rs`. The reservation is virtual
+/// and committed lazily, so the cost to every other suite sharing this runtime
+/// is nil.
+///
+/// Note that `ASUPERSYNC_THREAD_STACK_SIZE` does NOT reach this: the env
+/// overrides are applied on a different construction path, and setting it
+/// against this builder changes nothing. It has to be set here, and on every
+/// multi-thread runtime a suite builds for itself (see `tests/e2e_rpc.rs`).
+#[allow(dead_code)]
+pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Runs an async future to completion on an asupersync runtime.
 ///
@@ -81,6 +142,7 @@ where
             .enable_parking(false)
             .worker_threads(1)
             .blocking_threads(1, 8)
+            .thread_stack_size(WORKER_STACK_BYTES)
             .build()
             .expect("build asupersync runtime")
     });

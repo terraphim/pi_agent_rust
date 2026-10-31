@@ -19,6 +19,7 @@ use common::TestHarness;
 use pi::auth::{AuthCredential, AuthStorage, CredentialStatus};
 use pi::error::Error;
 use pi::error_hints::{format_error_with_hints, hints_for_error};
+use std::collections::HashMap;
 use std::io::Write;
 
 // ===========================================================================
@@ -180,6 +181,7 @@ fn credential_status_oauth_valid() {
     storage.set(
         "test-oauth",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "access-token".to_string(),
             refresh_token: "refresh-token".to_string(),
             expires: future_ts,
@@ -206,6 +208,7 @@ fn credential_status_oauth_expired() {
     storage.set(
         "test-expired",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "old-token".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires: past_ts,
@@ -277,6 +280,7 @@ fn api_key_returns_oauth_access_token() {
     storage.set(
         "provider",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "oauth-access-token".to_string(),
             refresh_token: "refresh".to_string(),
             expires: future_ts,
@@ -320,6 +324,7 @@ fn prune_stale_removes_old_oauth() {
     storage.set(
         "old-provider",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "old-token".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires: old_ts,
@@ -333,6 +338,7 @@ fn prune_stale_removes_old_oauth() {
     storage.set(
         "fresh-provider",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "fresh-token".to_string(),
             refresh_token: "fresh-refresh".to_string(),
             expires: fresh_ts,
@@ -366,6 +372,7 @@ fn prune_stale_preserves_refreshable_tokens() {
     storage.set(
         "refreshable",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: "old-token".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires: old_ts,
@@ -724,6 +731,7 @@ fn auth_credential_serde_round_trip() {
         (
             "oauth",
             AuthCredential::OAuth {
+                extra: HashMap::default(),
                 access_token: "access".to_string(),
                 refresh_token: "refresh".to_string(),
                 expires: 1_707_782_400_000,
@@ -780,12 +788,14 @@ fn auth_credential_oauth_minimal_serde() {
             expires,
             token_url,
             client_id,
+            extra,
         } => {
             assert_eq!(access_token, "at");
             assert_eq!(refresh_token, "rt");
             assert_eq!(expires, 0);
             assert!(token_url.is_none(), "optional token_url should be None");
             assert!(client_id.is_none(), "optional client_id should be None");
+            assert!(extra.is_empty(), "no extra keys for a minimal credential");
         }
         other => panic!("expected OAuth, got {other:?}"),
     }

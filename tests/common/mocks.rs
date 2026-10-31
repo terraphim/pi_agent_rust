@@ -11,7 +11,9 @@
 use async_trait::async_trait;
 use pi::error::Result;
 use pi::extension_dispatcher::ExtensionUiHandler;
-use pi::extensions::{ExtensionSession, ExtensionUiRequest, ExtensionUiResponse};
+use pi::extensions::{
+    ExtensionSession, ExtensionUiRequest, ExtensionUiResponse, SessionActionOrigin,
+};
 use pi::session::SessionMessage;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -471,7 +473,7 @@ impl ExtensionSession for RecordingSession {
         self.branch.lock().unwrap().clone()
     }
 
-    async fn set_name(&self, name: String) -> Result<()> {
+    async fn set_name(&self, name: String, _origin: Option<SessionActionOrigin>) -> Result<()> {
         self.record_call("set_name", serde_json::json!({ "name": name }));
         let mut state = self.state.lock().unwrap();
         if let Value::Object(ref mut map) = *state {
@@ -480,7 +482,11 @@ impl ExtensionSession for RecordingSession {
         Ok(())
     }
 
-    async fn append_message(&self, message: SessionMessage) -> Result<()> {
+    async fn append_message(
+        &self,
+        message: SessionMessage,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.record_call(
             "append_message",
             serde_json::json!({ "variant": format!("{message:?}").chars().take(80).collect::<String>() }),
@@ -489,7 +495,12 @@ impl ExtensionSession for RecordingSession {
         Ok(())
     }
 
-    async fn append_custom_entry(&self, custom_type: String, data: Option<Value>) -> Result<()> {
+    async fn append_custom_entry(
+        &self,
+        custom_type: String,
+        data: Option<Value>,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.record_call(
             "append_custom_entry",
             serde_json::json!({ "type": custom_type, "data": data }),
@@ -501,7 +512,12 @@ impl ExtensionSession for RecordingSession {
         Ok(())
     }
 
-    async fn set_model(&self, provider: String, model_id: String) -> Result<()> {
+    async fn set_model(
+        &self,
+        provider: String,
+        model_id: String,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.record_call(
             "set_model",
             serde_json::json!({ "provider": provider, "model_id": model_id }),
@@ -528,7 +544,11 @@ impl ExtensionSession for RecordingSession {
         (provider, model_id)
     }
 
-    async fn set_thinking_level(&self, level: String) -> Result<()> {
+    async fn set_thinking_level(
+        &self,
+        level: String,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.record_call("set_thinking_level", serde_json::json!({ "level": level }));
         let mut state = self.state.lock().unwrap();
         if let Value::Object(ref mut map) = *state {
@@ -546,7 +566,12 @@ impl ExtensionSession for RecordingSession {
             .map(String::from)
     }
 
-    async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
+    async fn set_label(
+        &self,
+        target_id: String,
+        label: Option<String>,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.record_call(
             "set_label",
             serde_json::json!({ "target_id": target_id, "label": label }),
@@ -848,6 +873,64 @@ impl FsFixture {
     }
 }
 
+// ─── Mock `gh` (for `/share`) ──────────────────────────────────────────────
+
+/// Write an executable mock `gh` into `dir` and report its path.
+///
+/// It answers `gh auth status` successfully, copies the payload of
+/// `gh gist create` to `<dir>/uploaded.html`, prints `gist_url`, and records
+/// every invocation's arguments to `<dir>/gh_args.log` — which is what lets a
+/// test assert that `gh` was NOT invoked, not merely that the command failed.
+/// Anything else exits 2 with the arguments on stderr, so an unexpected call
+/// fails loudly rather than looking like a success.
+///
+/// Shared by the classic and ftui `/share` scenarios (bd-ydz1t.1); both drive
+/// the same `run_share` implementation, so they must drive the same mock or
+/// the comparison proves nothing.
+#[must_use]
+pub fn write_mock_gh_script(dir: &Path, gist_url: &str) -> PathBuf {
+    let gh_path = dir.join("gh");
+    let args_path = dir.join("gh_args.log");
+    let uploaded_path = dir.join("uploaded.html");
+    let script = format!(
+        r#"#!/bin/sh
+set -e
+
+# Record all invocations
+echo "$@" >> "{args_log}"
+
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+
+if [ "$1" = "gist" ] && [ "$2" = "create" ]; then
+  upload_path=""
+  for arg in "$@"; do
+    upload_path="$arg"
+  done
+  cp "$upload_path" "{uploaded}"
+  echo "{gist_url}"
+  exit 0
+fi
+
+echo "unexpected gh args: $@" >&2
+exit 2
+"#,
+        args_log = args_path.display(),
+        uploaded = uploaded_path.display(),
+    );
+    std::fs::write(&gh_path, script).expect("write mock gh");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod mock gh");
+    }
+
+    gh_path
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -932,17 +1015,18 @@ mod tests {
         run_async({
             let s = Arc::clone(&session);
             async move {
-                s.set_name("test-session".to_string()).await.unwrap();
-                s.set_model("anthropic".to_string(), "claude-3".to_string())
+                s.set_name("test-session".to_string(), None).await.unwrap();
+                s.set_model("anthropic".to_string(), "claude-3".to_string(), None)
                     .await
                     .unwrap();
                 s.append_custom_entry(
                     "bookmark".to_string(),
                     Some(serde_json::json!({"url": "https://example.com"})),
+                    None,
                 )
                 .await
                 .unwrap();
-                s.set_label("entry-1".to_string(), Some("important".to_string()))
+                s.set_label("entry-1".to_string(), Some("important".to_string()), None)
                     .await
                     .unwrap();
             }
@@ -1127,7 +1211,7 @@ mod tests {
         run_async({
             let s = Arc::clone(&session);
             async move {
-                s.set_name("tracked".to_string()).await.unwrap();
+                s.set_name("tracked".to_string(), None).await.unwrap();
             }
         });
 

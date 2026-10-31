@@ -401,10 +401,10 @@ impl Drop for TestHarness {
             }
             eprintln!("=== END LOGS ===\n");
 
-            if let Ok(path) = env::var("TEST_LOG_PATH") {
-                if let Err(err) = self.logger.as_ref().write_dump_to_path(&path) {
-                    eprintln!("Failed to write test log to {path}: {err}");
-                }
+            if let Ok(path) = env::var("TEST_LOG_PATH")
+                && let Err(err) = self.logger.as_ref().write_dump_to_path(&path)
+            {
+                eprintln!("Failed to write test log to {path}: {err}");
             }
         }
     }
@@ -553,6 +553,19 @@ impl MockHttpResponse {
         }
     }
 }
+
+/// How long a single socket read waits before the loop looks at the clock.
+///
+/// Short on purpose: it is a polling interval, not a patience budget. The
+/// budget is [`REQUEST_READ_DEADLINE`], which covers the whole exchange.
+const READ_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long the server waits for one complete request before giving up.
+///
+/// Generous on purpose. Every expiry of this is a real failure worth reporting,
+/// whereas the old 2s per-read timeout expired routinely on a loaded host and
+/// reported a slow client as a broken one (bd-eg6ng).
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct MockHttpRequest {
@@ -719,6 +732,132 @@ impl Drop for MockHttpServer {
     }
 }
 
+/// Resolve a response for one request: queue pop, then static route, then
+/// (when the request carries a query string) the same lookups against the
+/// bare path. Exact matches always win; no registered route contains a
+/// query, so the fallback only widens.
+fn resolve_route(
+    method: &str,
+    path: &str,
+    routes: &Arc<Mutex<std::collections::HashMap<RouteKey, MockHttpResponse>>>,
+    route_queues: &Arc<
+        Mutex<std::collections::HashMap<RouteKey, std::collections::VecDeque<MockHttpResponse>>>,
+    >,
+) -> MockHttpResponse {
+    let lookup = |method: &str, path: &str| {
+        let key = RouteKey {
+            method: method.to_string(),
+            path: path.to_string(),
+        };
+        route_queues
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .and_then(std::collections::VecDeque::pop_front)
+            .or_else(|| routes.lock().unwrap().get(&key).cloned())
+    };
+    lookup(method, path)
+        .or_else(|| {
+            path.split_once('?')
+                .and_then(|(bare, _)| lookup(method, bare))
+        })
+        .unwrap_or_else(|| MockHttpResponse::text(404, "not found"))
+}
+
+/// Is this read error the socket's poll interval expiring rather than a failure?
+///
+/// std documents a read timeout as `WouldBlock` OR `TimedOut`, and matching only
+/// the first is what made this fixture fail on a slow client (bd-eg6ng).
+fn is_read_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Read until the request headers are complete; returns the offset of the
+/// CRLFCRLF that ends them. Patience is bounded by `deadline`, not by any one
+/// read.
+fn read_request_headers(
+    stream: &mut TcpStream,
+    scratch: &mut [u8],
+    buf: &mut Vec<u8>,
+    deadline: Instant,
+) -> std::io::Result<usize> {
+    loop {
+        if let Some(pos) = find_double_crlf(buf) {
+            return Ok(pos);
+        }
+        match stream.read(scratch) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before request headers",
+                ));
+            }
+            Ok(n) => buf.extend_from_slice(&scratch[..n]),
+            Err(err) if is_read_timeout(&err) => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "mock http server waited {}s for request headers and got {} bytes",
+                            REQUEST_READ_DEADLINE.as_secs(),
+                            buf.len()
+                        ),
+                    ));
+                }
+            }
+            Err(err) => return Err(err),
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "request headers too large",
+            ));
+        }
+    }
+}
+
+/// Fill `body` up to `content_length`, on the same deadline.
+///
+/// A gap between the headers and the body is the client being descheduled.
+/// Propagating that timeout with `?` was the worse half of bd-eg6ng: the
+/// headers had already been read, so the request was well formed and merely
+/// slow, and it was reported as a failed connection.
+fn read_request_body(
+    stream: &mut TcpStream,
+    scratch: &mut [u8],
+    body: &mut Vec<u8>,
+    content_length: usize,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let to_read = remaining.min(scratch.len());
+        // ubs:ignore-next-line to_read is min(_, scratch.len()) on the line above
+        match stream.read(&mut scratch[..to_read]) {
+            Ok(0) => return Ok(()),
+            Ok(n) => body.extend_from_slice(&scratch[..n]),
+            Err(err) if is_read_timeout(&err) => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "mock http server waited {}s for a {content_length}-byte body and got \
+                             {} bytes",
+                            REQUEST_READ_DEADLINE.as_secs(),
+                            body.len()
+                        ),
+                    ));
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 fn handle_connection(
     stream: &mut TcpStream,
     peer: SocketAddr,
@@ -730,36 +869,22 @@ fn handle_connection(
     logger: &TestLogger,
     scratch: &mut [u8],
 ) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+    // A read timeout here means "the client has not been scheduled yet", not
+    // "the request failed" (bd-eg6ng). The socket timeout is therefore a short
+    // POLLING interval, and patience is bounded by a wall deadline for the
+    // whole exchange instead of by a single read. The old shape was a 2s read
+    // timeout whose expiry ended the request: on a loaded host the client can
+    // easily take longer than that between connect and headers, or between
+    // headers and body, and the connection was then dropped with no response.
+    // The client sees that as a transient network error, so a slow machine
+    // silently turned into extra retries, extra failovers and flaky exact-count
+    // assertions in every test that uses this server.
+    stream.set_read_timeout(Some(READ_POLL_INTERVAL))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let deadline = Instant::now() + REQUEST_READ_DEADLINE;
 
     let mut buf = Vec::with_capacity(8192);
-    let header_end = loop {
-        if let Some(pos) = find_double_crlf(&buf) {
-            break pos;
-        }
-        match stream.read(scratch) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed before request headers",
-                ));
-            }
-            Ok(n) => buf.extend_from_slice(&scratch[..n]),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                // Transient EAGAIN (macOS); retry after a short sleep.
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                continue;
-            }
-            Err(err) => return Err(err),
-        }
-        if buf.len() > 64 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "request headers too large",
-            ));
-        }
-    };
+    let header_end = read_request_headers(stream, scratch, &mut buf, deadline)?;
 
     let header_bytes = &buf[..header_end];
     let mut body_bytes = buf[(header_end + 4)..].to_vec();
@@ -792,15 +917,7 @@ fn handle_connection(
         }
     }
 
-    while body_bytes.len() < content_length {
-        let remaining = content_length - body_bytes.len();
-        let to_read = remaining.min(scratch.len());
-        let n = stream.read(&mut scratch[..to_read])?;
-        if n == 0 {
-            break;
-        }
-        body_bytes.extend_from_slice(&scratch[..n]);
-    }
+    read_request_body(stream, scratch, &mut body_bytes, content_length, deadline)?;
 
     let request = MockHttpRequest {
         method: method.clone(),
@@ -824,14 +941,7 @@ fn handle_connection(
         }
     });
 
-    let route_key = RouteKey { method, path };
-    let response = route_queues
-        .lock()
-        .unwrap()
-        .get_mut(&route_key)
-        .and_then(std::collections::VecDeque::pop_front)
-        .or_else(|| routes.lock().unwrap().get(&route_key).cloned())
-        .unwrap_or_else(|| MockHttpResponse::text(404, "not found"));
+    let response = resolve_route(&method, &path, routes, route_queues);
 
     write_response(stream, &response)?;
     Ok(())
@@ -1115,20 +1225,20 @@ impl LiveE2eRegistry {
         if let Some(model_id) = requested_model {
             let model_id = model_id.trim();
             if !model_id.is_empty() {
-                if let Some(entry) = self.registry.find(target.provider, model_id) {
-                    if self.resolve_api_key_with_source(&entry).is_some() {
-                        return Some(entry);
-                    }
+                if let Some(entry) = self.registry.find(target.provider, model_id)
+                    && self.resolve_api_key_with_source(&entry).is_some()
+                {
+                    return Some(entry);
                 }
                 return None;
             }
         }
 
         for model_id in target.preferred_models {
-            if let Some(entry) = self.registry.find(target.provider, model_id) {
-                if self.resolve_api_key_with_source(&entry).is_some() {
-                    return Some(entry);
-                }
+            if let Some(entry) = self.registry.find(target.provider, model_id)
+                && self.resolve_api_key_with_source(&entry).is_some()
+            {
+                return Some(entry);
             }
         }
 

@@ -8,6 +8,10 @@ use this matrix to determine whether their extension will run unmodified.
 
 ## Conformance Snapshot
 
+These are the existing corpus results, not a new conformance run for the
+context-mode compatibility changes described below. Adding a module or passing
+a focused fixture does not establish compatibility with every npm dependency.
+
 | Surface | Result | Details |
 |---|---:|---|
 | Extension corpus (223 extensions) | 205/223 pass (91.9%) | 100% Tier 1, 95.4% Tier 2 |
@@ -24,7 +28,7 @@ use this matrix to determine whether their extension will run unmodified.
 | T1 | Simple single-file extensions | 38/38 (100%) | Run silently |
 | T2 | Multi-registration (tools + events + flags) | 83/87 (95.4%) | Run silently |
 | T3 | Multi-file with local imports | 79/90 (87.8%) | Run + warn if relative imports fail |
-| T4 | Extensions with npm dependencies | 1/3 (33.3%) | Blocked unless virtual stub exists |
+| T4 | Extensions with npm dependencies | 1/3 (33.3%) | Resolution stays within allowed roots; compatibility depends on required APIs |
 | T5 | Extensions using exec/network APIs | 4/5 (80.0%) | Capability-gated |
 
 ---
@@ -38,17 +42,17 @@ for the API subset that extensions actually use.
 
 | Module | Key APIs | Test coverage | Notes |
 |--------|----------|---:|-------|
-| `node:path` | `join`, `resolve`, `dirname`, `basename`, `extname`, `sep`, `posix`, `win32` | Full | POSIX semantics |
+| `node:path` | `join`, `resolve`, `dirname`, `basename`, `extname`, `sep`, `posix`, `win32` | Full | Native Windows or POSIX behavior; both explicit namespaces available on every host |
 | `node:fs` | `readFileSync`, `writeFileSync`, `statSync`, `mkdirSync`, `readdirSync`, `unlinkSync`, `rmSync`, `copyFileSync`, `renameSync`, `appendFileSync`, `accessSync`, `existsSync`, `realpathSync`, `readlinkSync`, `createReadStream`, `createWriteStream`, `chmodSync`, `chownSync` | 39 tests | Rooted to extension dir by default; permission changes are path-checking no-ops |
 | `node:fs/promises` | `readFile`, `writeFile`, `stat`, `mkdir`, `readdir`, `unlink`, `rm`, `access`, `copyFile`, `rename`, `chmod`, `chown`, `utimes` | Included above | Async versions of fs shim; permission changes are path-checking no-ops |
 | `node:crypto` | `createHash`, `createHmac`, `randomUUID`, `randomBytes`, `randomInt`, `timingSafeEqual`, `getHashes`, Ed25519 `sign`/`verify` | 56 tests | SHA-256/SHA-384/SHA-512, SHA-1, MD5, HMAC, KDFs; ciphers and RSA/ECDSA fail closed |
 | `node:buffer` | `Buffer.from`, `Buffer.alloc`, `Buffer.concat`, `Buffer.isBuffer`, `Buffer.byteLength`, `.toString()`, `.slice()`, `.subarray()`, `.compare()`, `.equals()`, `.indexOf()`, `.copy()` | 41 tests | Full Buffer protocol |
-| `node:child_process` | `spawnSync`, `execSync`, `execFileSync`, `spawn`, `exec`, `execFile` | 53 tests | Capability-gated (`exec`) |
-| `node:http` | `request`, `get`, `createServer`, `STATUS_CODES`, `METHODS`, `Agent` | 40 tests | `createServer` throws (sandbox) |
+| `node:child_process` | `spawnSync`, `execSync`, `execFileSync`, `spawn`, `exec`, `execFile` | Shim and persistent-session regressions | Capability-gated (`exec`); bounded piped sessions support interactive protocols |
+| `node:http` | `request`, `get`, `createServer`, `STATUS_CODES`, `METHODS`, `Agent` | HTTP shim and virtual server regressions | Outbound requests use the HTTP capability; explicit loopback servers are private in-memory routes, never OS listeners |
 | `node:https` | `request`, `get` | Shared with http | Same as `node:http` |
 | `node:events` | `EventEmitter`, `on`, `emit`, `once`, `removeListener`, `removeAllListeners`, `listenerCount` | 26 tests | Full EventEmitter pattern |
 | `node:os` | `platform`, `hostname`, `tmpdir`, `homedir`, `cpus`, `arch`, `type`, `release`, `userInfo`, `EOL` | Included | Returns host values |
-| `node:url` | `URL`, `URLSearchParams`, `parse`, `format`, `resolve` | 6 tests | WHATWG URL standard |
+| `node:url` | `URL`, `URLSearchParams`, `parse`, `format`, `resolve` | URL shim regressions | URL construction and base resolution use the native URL parser; the mutable JS surface remains bounded |
 | `node:process` | `env`, `argv`, `cwd`, `exit`, `platform`, `arch`, `version`, `pid`, `hrtime` | 24 tests | `exit` is sandboxed |
 | `node:util` | `format`, `inspect`, `inherits`, `deprecate`, `debuglog`, `types`, `TextEncoder`, `TextDecoder`, `stripVTControlCharacters` | Included | Standard utility functions |
 | `node:stream` | `Readable`, `Writable`, `Transform`, `Duplex`, `PassThrough`, `pipeline`, `finished` | Included | Stream constructors + helpers |
@@ -93,14 +97,138 @@ Pi provides a targeted Bun compatibility surface via `globalThis.Bun` and
 | `Bun.argv` | Supported | Process arguments |
 | `Bun.file(path)` | Supported | Returns object with `exists()`, `text()`, `arrayBuffer()`, `json()` |
 | `Bun.write(path, data)` | Supported | Write files |
-| `Bun.which(command)` | Supported | Locate executables on PATH |
+| `Bun.which(command)` | Supported | Metadata-only lookup in the runtime's configured PATH; requires `exec` permission |
 | `Bun.spawn(...)` | Supported | Capability-gated (`exec`) |
+| `bun:sqlite` | Supported subset | Real FrankenSQLite databases; ESM and `createRequire()` return the same `Database` constructor |
 | `Bun.connect(...)` | Stubbed (no network) | In-memory socket emitter; use `pi.http()` or `node:http` for real network |
 | `Bun.listen(...)` | Stubbed (no network) | In-memory server emitter; use `pi.http()` or `node:http` for real network |
+
+### SQLite databases
+
+`import { Database } from "bun:sqlite"` and
+`createRequire(import.meta.url)("bun:sqlite").Database` use the repository's
+existing FrankenSQLite engine. Supported operations include schema creation
+and migration, parameterized statements, `run`, `get`, `all`, `values`,
+`iterate`, nested synchronous transactions, WAL pragmas, and close/reopen.
+`prepare()` parses schema and transaction statements using the engine's SQL
+parser; their semantic checks happen when executed because the engine does not
+compile those statements into prepared programs. Query and DML statements use
+the engine's prepared programs.
+
+`INSERT`, `UPDATE`, and `DELETE ... RETURNING` produce real result rows,
+including the resume-state updates used by context-mode. A bridge row or
+encoding-limit failure rolls back that statement's changes while preserving
+earlier work in an outer transaction. Native constraint failures retain
+SQLite's `ABORT`, `FAIL`, and `ROLLBACK` semantics.
+
+Native SQLite errors retain their canonical `code`, extended `errno`, and
+`primaryCode`. The message includes the canonical code so integrations such
+as context-mode can recognize a busy database and retry. Host admission
+failures remain separate; SQL text and filenames cannot impersonate native
+error classifications. Nested transactions preserve the original error when
+SQLite has already rolled back the entire transaction.
+
+File-backed databases require an extension-owned persistent storage grant and
+the corresponding read/write capabilities. `:memory:` databases acquire no
+filesystem permission. Database handles cannot be transferred to another
+extension. SQL batches are admitted in full before their first statement runs;
+SQL cannot acquire additional paths through `ATTACH`, `VACUUM INTO`, loadable
+extensions, filesystem functions, arbitrary virtual-table modules, or writable
+schema/directory pragmas. FTS5 is the only admitted virtual-table module.
+Triggers and allocating scalar functions such as `randomblob`, `zeroblob`,
+`printf`, and `format` are unsupported. Unsupported APIs and pragmas throw errors. In
+particular, the optional `mmap_size` optimization used by context-mode is not
+implemented.
+
+The bridge bounds database handles, SQL/request size, returned rows and bytes,
+page cache, and workers. Each engine operation has a cooperative cancellation
+deadline; a timed-out worker is retired and never reused. These limits do not
+provide an OS memory sandbox for every SQL intermediate allocation. The native
+database-family size limit is checked before and after operations, so it is
+not a hard per-write disk quota.
+
+Database files and the engine's companion files are checked for symlinks,
+reparse points, and hard links, with pinned parent identities rechecked around
+operations. Guest filesystem APIs cannot create native links in a storage
+grant. FrankenSQLite's native VFS still opens pathnames: on Unix, this does not
+isolate the database from a separate native process with the same OS user
+identity concurrently replacing directories. Applications requiring that
+stronger boundary need an OS sandbox or a descriptor-based engine VFS.
+
+### Persistent subprocess protocols
+
+`spawn()` supports real piped stdin/stdout/stderr for protocols such as MCP,
+including writes queued before admission, write callbacks, backpressure, EOF,
+and process exit. Logical stdin writes up to the existing pending-byte budget
+are segmented into bounded native chunks, with one callback after the entire
+write completes. This supports large MCP requests without a partial write
+when admission rejects an oversized request. Creation goes through the existing `exec` policy, command
+mediation, and admission accounting. Native callbacks operate only on opaque,
+extension-owned handles; they cannot launch another process or signal an
+arbitrary PID. Input, output, session counts, environment size, and lifetime
+are bounded. Shutdown retires the owned process group and retains admission
+accounting until cleanup finishes.
+Per-runtime process slots also remain reserved until the child and its I/O
+workers actually finish, including after a handle is closed or startup fails.
+
+The runtime services timers and subprocess callbacks while its command channel
+is idle. Healthy extension realms receive turns in stable round-robin order;
+each turn advances a scheduler step and at most one queued hostcall. A slow
+hostcall retains its dispatch future across turns, preserving capability
+checks, request ownership, and captured session provenance. A later command
+continues polling that same work instead of launching it again. Lifecycle
+commands take priority over idle work, and cancellation, replacement, and
+shutdown drop pending dispatch state before acknowledging completion.
+
+Application ownership is tracked separately from internal manager references.
+Dropping the last public manager or runtime handle signals the actor even when
+a pending hostcall or subprocess cleanup retains an internal manager. A public
+runtime handle can outlive its manager. Shutdown uses a stop latch so a full
+command queue cannot block the shutdown request before its cleanup budget.
+Existing JavaScript instruction and microtask limits remain in force; idle
+scheduling does not add a hard wall-time limit to synchronous guest code.
+
+The runtime recognizes only the exact conventional executable probes
+`command -v NAME` on POSIX and `where NAME` on Windows. It answers them using
+file metadata and the configured PATH/PATHEXT, without running a shell.
+General synchronous process execution retains its existing opt-in requirement.
+Child environments are explicit and filtered for secrets and loader injection.
+Spreading `process.env` copies only the owner-permitted environment snapshot,
+in stable key order. Loader hooks (such as `NODE_OPTIONS` and `LD_PRELOAD`) and
+invalid child bindings are omitted from enumeration, while individual reads
+remain subject to environment disclosure policy. A secret disclosure allowlist
+permits individual reads without enabling implicit secret forwarding; custom
+secret rules also filter the inherited child snapshot. Explicitly supplying unsafe
+child bindings is rejected. A global or per-extension environment denial
+exposes no snapshot keys or values. Pi
+advertises its configuration directory through `PI_CONFIG_DIR` metadata while
+preserving an explicitly configured value. This lets child integrations
+identify their host without receiving read access to a parent data directory.
+Context-mode's MCP server still needs a real Node or Bun executable on PATH.
+Its process launch and environment snapshot require the existing `exec` and
+`env` permissions; installing a package or granting storage does not enable
+those capabilities. See the [extension security operator handbook](security/operator-handbook.md#dangerous-capability-opt-in)
+for the existing opt-in and policy precedence rules.
+An allowed external process runs with the host user's OS authority, as with
+the existing `exec` capability; the extension's data-directory grants do not
+constitute a sandbox for external executables.
 
 ---
 
 ## 4. Virtual npm Module Stubs
+
+The CommonJS transform hoists only free `require()` calls. A locally bound
+`createRequire()` or function parameter keeps its normal scope and lazy
+execution, so an inactive optional native dependency does not prevent a Bun
+SQLite extension from loading. CommonJS function and primitive exports retain
+their actual values when consumed by another transformed module.
+
+File URL helpers preserve spaces, Unicode, and literal URL delimiters in
+filenames, with explicit POSIX/Windows conversion and drive/UNC handling.
+The resolver decodes file URLs before applying the existing import-root
+policy; encoded separators and malformed encodings are rejected. Module
+metadata and CommonJS filenames use the same conversion, including dynamic
+imports built from `pathToFileURL()`.
 
 Extensions that import popular npm packages get virtual stubs that expose the
 package's public API shape. These stubs allow extensions to load and register
@@ -128,10 +256,75 @@ without runtime errors, even when the real package is not installed.
 | `ms` | Duration parsing |
 | `diff` | `diffChars`, `diffLines`, `createPatch` |
 | `glob` | `glob`, `globSync` |
+| `undici` | `fetch`, `Headers`, `Response`; explicit unsupported `Agent` constructor |
 
 `jsonwebtoken` support is intentionally bounded to HMAC JWTs. RSA/ECDSA
 algorithms and unsupported verification options fail closed with explicit
 diagnostics instead of silently accepting tokens.
+
+### pi-freeflow 1.39.0 and optional Undici dispatchers
+
+The current pi-freeflow release imports `Agent` from `undici`, even though
+connection pooling is optional. PiJS registers a narrow `undici` compatibility
+module so this import resolves. Its fetch exports use the same capability-gated
+transport as global `fetch`. PiJS does not advertise `process.versions.undici`:
+Freeflow's version check therefore selects its built-in-fetch fallback.
+Constructing an `Agent` or passing a custom fetch dispatcher fails explicitly;
+there is no npm package loading, custom socket transport, or alternate TLS
+authority behind this module.
+
+Import resolution alone is insufficient for this extension. Freeflow also
+starts a local proxy and registers an OpenAI-compatible provider against it.
+PiJS implements `http.createServer(listener).listen(port, host)` as a private
+in-memory route when `host` is explicitly `127.0.0.1`, `localhost`, or `::1`.
+Routes belong to the extension that registered them. A provider registered by
+that same extension can use its route through the existing native provider
+request/response codecs; no real port is bound and other extensions cannot
+intercept the route. Unsupported listen forms and non-loopback hosts fail.
+Freeflow's detached daemon spawn options remain unsupported, allowing its
+existing in-process fallback to run.
+
+The provider keeps its originally granted extension/origin binding when that
+extension closes and replaces the listener on the same port. Each new request
+resolves the current owned listener; a provider that had no route when it was
+registered cannot acquire one later without registration. URL construction
+resolves root-relative health and control paths against the origin, allowing
+Freeflow's health, client attachment, shutdown, and recovery operations to use
+their intended endpoints.
+
+Provider-level and model-level `compat` settings survive registration and merge
+with model settings taking precedence. A model's top-level `thinkingLevelMap`
+overrides the compatibility map. String values remap effort names; explicit
+`null` values disable those tiers, while omitted keys retain existing defaults.
+The native model picker and request serializers honor that distinction.
+OpenAI-compatible providers may explicitly enable the plain `reasoning_effort`
+field with `supportsReasoningEffort: true`; declared OpenRouter formats retain
+their `reasoning` object. Undeclared providers keep their existing request shape.
+
+Outbound fetch and Node HTTP calls still require the extension's HTTP
+capability and the connector's TLS/host policy. Responses expose headers before
+streaming body bytes; reader cancellation, request destruction, abort signals,
+header deadlines, body idle timeouts, and runtime task deadlines retain owned
+transport cleanup. `AbortSignal.any()` composes caller and timeout signals.
+`Readable.fromWeb()` and `StringDecoder` preserve byte and split UTF-8 behavior.
+JavaScript tasks awaiting deferred HTTP work yield to the native executor so
+socket readiness, other tasks, and timers can progress within the root deadline.
+Limits include 16 virtual servers and 64 active virtual requests per realm,
+1 MiB of queued virtual response data, a 10 MiB virtual request body, and the
+configured connector response limit. Custom TLS/socket overrides and streaming
+fetch uploads are rejected rather than acquiring additional authority.
+
+Regression coverage is in `tests/node_http_shim.rs`,
+`tests/virtual_http_server.rs`, and the provider/runtime unit tests. The optional
+`scripts/freeflow_compat_probe.mjs` reads the actual embedded JavaScript and
+loads a pinned, clean upstream checkout at
+`c4370df7fd4d186d00a33e4fc177ea340abf08d3` with controlled HTTP responses.
+It covers the import, dispatcher fallback, activation, model metadata, relay
+behavior, proxy streaming and recovery, health/control requests, and
+Windows/POSIX path projections. The script documents setup and
+usage. These V8-based diagnostics do not replace QuickJS/Rust execution or a
+native Windows run; use `dsr quality --tool pi_agent_rust` for the authoritative
+repository gate.
 
 ### Runtime API Compatibility Modules
 
@@ -236,6 +429,49 @@ Extension access to sensitive APIs is governed by capability policies.
 Use `pi doctor <path> --policy <profile>` to check extension compatibility
 under a specific policy.
 
+### Persistent application state
+
+Ordinary extension writes retain their existing virtual-filesystem behavior.
+Persistent data directories are separate host-assigned capabilities and are
+never added to the JavaScript module resolver's search roots.
+
+For a verified installed npm extension, the loader can assign
+`~/.pi/<package-name>` (or `~/.pi/@scope/<package-name>`). Verification requires
+the installed `node_modules` path, manifest package name, and the declared
+`pi.extensions` entrypoint to agree. Thus `npm:context-mode` can create and
+reopen `~/.pi/context-mode/sessions` without receiving access to all of HOME or
+all of `.pi`. Pi's own configuration/authentication directories and unsafe
+namespace components are reserved. Ambiguous package origins or shared legacy
+extension IDs suppress automatic grants and emit diagnostics; unrelated
+extensions retain their own grants. Invalid or linked automatic roots remain
+deny-only boundaries.
+
+Each owner's storage paths are resolved once using that owner's runtime
+configuration. Every realm receives the same protected path boundaries before
+extension factories run, including when environment permissions differ or a
+configured home directory lies beneath the workspace.
+
+The host embedding API `PiJsRuntime::add_persistent_storage_root` can assign an
+explicit absolute directory to one extension. Guest code, package metadata,
+and environment changes cannot add arbitrary paths. A custom
+`CONTEXT_MODE_DATA_DIR` outside the assigned namespace therefore requires a
+corresponding host grant.
+
+Persistent reads and mutations check ownership and read/write policy. Mutations
+use no-follow directory handles on Unix and pinned, reparse-checked directory
+handles on Windows. Traversal, linked targets, Windows device paths/names,
+alternate data streams, and overlapping grants to different owners are
+rejected. Checks inspect original inputs and virtual symlink targets before
+normalization can discard forbidden components. These directories support
+durable mkdir/mkdtemp, file reads/writes/appends, copy, rename, unlink, and
+empty-directory removal. Read-only descriptors belong to the extension that
+opened them and can still be closed by that owner after a path is revoked.
+`realpath` and `realpathSync.native` resolve authorized existing host paths,
+including project aliases, with a fallback for genuine virtual files.
+Writable descriptors,
+symlink creation, recursive directory deletion, and cross-filesystem rename
+are explicitly unsupported within a persistent grant.
+
 ---
 
 ## 7. Preflight Analysis
@@ -268,21 +504,25 @@ The report includes:
 
 ### Module Resolution
 
-- **Bare package specifiers** (`import foo from "some-package"`) require a
-  virtual stub entry. Extensions using unlisted npm packages will fail to load.
+- **Bare package specifiers** (`import foo from "some-package"`) must resolve
+  to an installed package within the allowed extension roots or a registered
+  virtual module. Resolution does not supply native addons or complete Node/Bun
+  API compatibility.
 - **Relative imports** (`import ./utils`) work within bundled extensions but may
   fail for multi-file extensions that were not bundled.
 - **Network imports** (`import "https://..."`) are rejected.
 
 ### Runtime Constraints
 
-- **Single-threaded**: No `worker_threads`, no parallel execution.
+- **JavaScript execution**: No guest `worker_threads`; bounded native workers
+  handle SQLite and subprocess I/O.
 - **No native addons**: C/C++ Node addons cannot be loaded. Use hostcalls or
   WASM instead.
 - **Sandbox boundary**: `createServer`, `listen`, and other server-side APIs are
   blocked. Extensions are clients, not servers.
-- **Filesystem scope**: By default, filesystem access is scoped to the extension
-  directory. Reads outside require explicit capability grants.
+- **Filesystem scope**: Extension/workspace access retains its existing policy.
+  Persistent application namespaces are separate, owner-scoped data grants;
+  they do not authorize arbitrary HOME access or native addon loading.
 
 ### Remaining Failure Buckets (18/223)
 

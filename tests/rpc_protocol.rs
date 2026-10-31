@@ -1,4 +1,8 @@
 #![allow(clippy::similar_names)]
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -92,19 +96,22 @@ fn rpc_rejects_invalid_json_and_missing_type() {
         let auth = AuthStorage::load(harness.temp_path("auth.json")).expect("load auth storage");
         let options = RpcOptions {
             config: Config::default(),
+            working_directory: None,
             resources: ResourceLoader::empty(false),
             available_models: Vec::new(),
             scoped_models: Vec::new(),
             cli_api_key: None,
             auth,
             runtime_handle: handle.clone(),
+            ask_tool: None,
         };
 
         let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
         let (out_tx, out_rx) = rpc_output_channel();
         let out_rx = Arc::new(Mutex::new(out_rx));
 
-        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+        let server =
+            handle.spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
         let cx = asupersync::Cx::for_testing();
 
@@ -164,19 +171,22 @@ fn rpc_errors_on_unknown_command_and_missing_params() {
         let auth = AuthStorage::load(harness.temp_path("auth.json")).expect("load auth storage");
         let options = RpcOptions {
             config: Config::default(),
+            working_directory: None,
             resources: ResourceLoader::empty(false),
             available_models: Vec::new(),
             scoped_models: Vec::new(),
             cli_api_key: None,
             auth,
             runtime_handle: handle.clone(),
+            ask_tool: None,
         };
 
         let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
         let (out_tx, out_rx) = rpc_output_channel();
         let out_rx = Arc::new(Mutex::new(out_rx));
 
-        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+        let server =
+            handle.spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
         let cx = asupersync::Cx::for_testing();
 
@@ -268,6 +278,7 @@ fn rpc_get_messages_preserves_tool_call_identity_and_args() {
                     ..Usage::default()
                 },
                 stop_reason: StopReason::ToolUse,
+                stop_details: None,
                 error_message: None,
                 timestamp: now,
             },
@@ -286,19 +297,22 @@ fn rpc_get_messages_preserves_tool_call_identity_and_args() {
         let auth = AuthStorage::load(harness.temp_path("auth.json")).expect("load auth storage");
         let options = RpcOptions {
             config: Config::default(),
+            working_directory: None,
             resources: ResourceLoader::empty(false),
             available_models: Vec::new(),
             scoped_models: Vec::new(),
             cli_api_key: None,
             auth,
             runtime_handle: handle.clone(),
+            ask_tool: None,
         };
 
         let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
         let (out_tx, out_rx) = rpc_output_channel();
         let out_rx = Arc::new(Mutex::new(out_rx));
 
-        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+        let server =
+            handle.spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
         let cx = asupersync::Cx::for_testing();
         in_tx

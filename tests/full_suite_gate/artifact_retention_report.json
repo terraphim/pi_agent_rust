@@ -1,42 +1,29 @@
 {
   "artifact_categories": [
     {
-      "includes": [
-        "ext_conformance/**",
-        "e2e_results/**",
-        "quarantine_*"
-      ],
+      "includes": ["ext_conformance/**", "e2e_results/**", "quarantine_*"],
       "name": "conformance-reports",
       "retention_days": 30
     },
     {
-      "includes": [
-        "full_suite_gate/**",
-        "cross_platform_reports/**"
-      ],
+      "includes": ["full_suite_gate/**", "cross_platform_reports/**"],
       "name": "provider-test-artifacts",
       "retention_days": 30
     },
     {
-      "includes": [
-        "e2e_results/ci-shards/<shard>/"
-      ],
+      "includes": ["e2e_results/ci-shards/<shard>/"],
       "name": "ci-shard-*",
       "retention_days": 30
     },
     {
-      "includes": [
-        "llvm-cov-summary.txt",
-        "lcov.info",
-        "llvm-cov/html"
-      ],
+      "includes": ["llvm-cov-summary.txt", "lcov.info", "llvm-cov/html"],
       "name": "coverage",
       "retention_days": 90
     }
   ],
   "bead": "bd-3uqg.8.11",
   "ci_workflow": {
-    "artifact_upload_steps": 11,
+    "artifact_upload_steps": 12,
     "explicit_retention_30d": 3,
     "test_path_references": 14
   },
@@ -46,7 +33,7 @@
     "qa_runbook": "docs/qa-runbook.md",
     "testing_policy": "docs/testing-policy.md"
   },
-  "generated_at": "2026-05-12T19:26:21.391739911+00:00",
+  "generated_at": "2026-08-04T22:32:18.254593818+00:00",
   "schema": "pi.ci.artifact_retention_report.v1",
   "triage_artifacts": {
     "evidence_contract": "tests/e2e_results/<ts>/evidence_contract.json",

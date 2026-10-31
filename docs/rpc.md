@@ -45,13 +45,183 @@ Communication is via **JSON Lines** over stdin/stdout. Each line must be a valid
 ## Commands
 
 ### Chat
+
 - **prompt**: Send a user message.
-  - Params: `message` (string), `images` (optional array), `streamingBehavior` ("steer" or "follow-up").
+  - Params: `message` (string), `images` (optional array), `media` (optional array), or an exclusive `content` array; `streamingBehavior` ("steer" or "follow-up").
 - **steer**: Interrupt current generation and steer.
-  - Params: `message`.
+  - Params: `message`, `images` (optional array), `media` (optional array), or an exclusive `content` array.
 - **follow_up**: Queue a message to follow current turn.
-  - Params: `message`.
-- **abort**: Stop generation.
+  - Params: `message`, `images` (optional array), `media` (optional array), or an exclusive `content` array.
+- **retry**: Rerun the last durable user turn, preserving its text, images, and media.
+- **abort**: Stop generation or request cancellation of an active handoff.
+
+Audio and video attachments use native content blocks in `media`. For example,
+replace the example payload with the standard base64 encoding of your file:
+
+```json
+{
+  "id": "clip-1",
+  "type": "prompt",
+  "message": "Describe this clip",
+  "media": [
+    {"type": "media", "mimeType": "video/mp4", "data": "YQ==", "name": "clip.mp4"}
+  ]
+}
+```
+
+When using separate attachment fields, `message` is required and can be empty
+for an attachment-only turn. Images accept the public SDK shape
+`{"data":"YQ==","mimeType":"image/png"}` as well as the existing shape:
+`{"type":"image","source":{"type":"base64","mediaType":"image/png","data":"..."}}`.
+The user message contains nonempty text first, then `images` in array order,
+then `media` in array order. Empty attachment arrays behave like text-only input.
+
+Use `content` to preserve arbitrary interleaving of text, images, audio, and
+video. It cannot be combined with `message`, `images`, or `media`, including
+null or empty values for those fields:
+
+```json
+{
+  "id": "compare-1",
+  "type": "prompt",
+  "content": [
+    {"type": "text", "text": "Listen to this first."},
+    {"type": "media", "data": "YQ==", "mimeType": "audio/wav", "name": "voice.wav"},
+    {"type": "image", "data": "Yg==", "mimeType": "image/png"},
+    {"type": "text", "text": "Compare it with this frame."}
+  ]
+}
+```
+
+These payload bytes are illustrative; replace them with your encoded files.
+Native content is literal: text whitespace and block order are retained, and
+text does not invoke slash commands, prompt templates, or magic keywords.
+Only user text/image/media blocks are accepted. The array must contain 1–256
+blocks, including at most 32 audio/video blocks, and the normalized content
+JSON must fit 64 MiB, counting text escaping, base64, metadata, and block syntax.
+Native images require canonical standard base64 and an `image/*` MIME type,
+with a 20 MiB decoded per-image limit. Direct SDK images in `images` also have
+aggregate bounds of 256 native images and 64 MiB of encoded image payloads.
+
+Each media item requires `type: "media"`, an `audio/*` or `video/*` `mimeType`,
+and nonempty canonical standard base64 `data`; padding is optional. `name` is
+an optional source label, sanitized and bounded before entering session state.
+URLs, file paths, and session-local blob references are not accepted as payloads.
+Malformed media is rejected before acknowledgment, queue mutation, or session
+recovery. The decoded per-file cap is `media.maxBytes` (5 MiB by default); RPC
+also limits a command to 32 media items and 64 MiB of decoded media in total.
+
+Both input forms work with `steer`, `follow_up`, and a streaming `prompt`
+that specifies `streamingBehavior`. Accepted attachments survive automatic
+retry and terminal queue recovery. Explicit `retry` preserves the original
+structured block order, including attachment-only turns. Large payloads use
+the session's content-addressed sidecar when saved and hydrate on resume.
+Extension commands reject image/media attachments because their command
+handlers have no attachment input path.
+
+Gemini-family providers receive native audio/video input through their media
+transport. Audio-capable OpenAI Chat Completions models with explicit audio
+pricing (including `openai/gpt-audio-1.5`) receive WAV/MP3 as native audio and
+return text. Other media uses the documented `[media omitted: ...]` placeholder.
+Session and RPC message events retain the native content blocks. Native Chat
+audio also enforces per-request transport bounds and requires detailed streamed
+billing; see [model configuration](models.md#native-audio-with-openai-chat-completions).
+
+### Compact output and attachment retrieval
+
+RPC output defaults to `full`, preserving the existing inline payload format.
+Clients that understand attachment references can opt into `compact` output
+while the connection is idle:
+
+```json
+{"id":"mode-1","type":"set_output_mode","mode":"compact"}
+```
+
+The successful response contains `data: {"mode":"compact"}`; `get_state`
+also reports `outputMode`. Switching to either mode is rejected during a
+streaming turn or context compaction, so a turn has one output format.
+Use `{"type":"set_output_mode","mode":"full"}` to restore full output.
+
+In compact mode, native image and media blocks in message history and
+message-bearing events keep their type, MIME type, optional name, and position.
+An admitted block replaces only its base64 `data` string with this object:
+
+```json
+{
+  "type":"image",
+  "mimeType":"image/png",
+  "data":{
+    "attachmentId":"rpc:...",
+    "$piBlob":"sha256:...",
+    "sizeBytes":3,
+    "encoding":"base64"
+  }
+}
+```
+
+The IDs and digest above are placeholders: use the exact `attachmentId`
+issued by this connection. `$piBlob` identifies the SHA-256 digest of the
+decoded bytes; `encoding` is `base64` or `base64NoPad` and records the
+original spelling. Identical decoded bytes share an attachment ID even when
+their original padding differs. Text, signed thinking, tool arguments,
+custom details, and other opaque JSON remain unchanged.
+
+Compact `message_update` events use the delta-only assistant event shape:
+incremental updates omit the cumulative `message` and `partial` snapshots.
+Message start/end, turn end, agent end, and tool output events retain their
+lifecycle fields and terminal results, with native attachment data projected
+as above. Terminal assistant events retain their final assistant payload.
+`get_messages` uses borrowed compact projections without first cloning the
+complete encoded attachment strings. `get_fork_messages` keeps its existing
+`{entryId, text}` user-message previews; constructing those previews also
+avoids cloning attachment contents.
+
+Retrieve an issued attachment in bounded chunks:
+
+```json
+{"id":"bytes-1","type":"get_attachment","attachmentId":"rpc:...","offset":0,"maxBytes":2}
+```
+
+For an illustrative three-byte payload, the response data can be:
+
+```json
+{
+  "attachmentId":"rpc:...",
+  "$piBlob":"sha256:...",
+  "offset":0,
+  "nextOffset":2,
+  "bytesReturned":2,
+  "sizeBytes":3,
+  "data":"YWI=",
+  "eof":false
+}
+```
+
+Offsets and lengths count **decoded bytes**. The default `offset` is 0;
+`maxBytes` defaults to 65,536 and must be between 1 and 1,048,576.
+Each returned `data` chunk is independently encoded with standard padded
+base64. Decode each chunk before concatenating its bytes, then request the
+returned `nextOffset` until `eof` is true. Reading exactly at `sizeBytes`
+returns an empty chunk with `eof: true`; reading beyond it is an error.
+
+The connection retains at most 128 MiB of decoded attachments, with a
+64 MiB per-attachment limit and at most 4,096 distinct attachments. It does
+not evict issued references. When data is malformed, noncanonical, oversized,
+or cannot fit in the catalog, the original inline string is preserved.
+Clients must therefore accept either form of `data` in compact mode.
+These bounds apply to retained attachment bytes, not every RPC frame or
+total process memory, and do not increase the existing media input limits.
+
+Issued IDs remain readable across output mode changes. They expire after
+a successful `new_session`, `switch_session`, or `fork`, and when the RPC
+connection closes. Failed or cancelled session transitions keep existing IDs
+valid. Retrieval accepts issued IDs, not filesystem paths or bare digests.
+Attachment reference objects are an output format; they are not accepted in
+`prompt`, `steer`, or `follow_up` inputs.
+
+Compact output changes RPC serialization and retrieval. Native session loading,
+provider requests, and extension payloads continue to use their complete
+in-memory content; session resume still hydrates saved sidecar payloads.
 
 ### Session
 - **new_session**: Start fresh.
@@ -64,12 +234,120 @@ Communication is via **JSON Lines** over stdin/stdout. Each line must be a valid
   - Params: `outputPath`.
 - **compact**: Trigger context compaction.
   - Params: `customInstructions` (optional), `reserveTokens` (optional), `keepRecentTokens` (optional).
+- **handoff**: Generate and durably install a continuation brief in this session.
+  - Params: `focus` (optional string, at most 4096 UTF-8 bytes, no NUL).
 - **fork**: Fork from a message.
   - Params: `entryId`.
 
+### Manual compaction progress
+
+```json
+{"id":"compact-1","type":"compact","customInstructions":"Retain the decisions and unresolved failures"}
+```
+
+An admitted `compact` request emits exactly one `manual_compaction_start` and
+one `manual_compaction_end`, followed by its terminal `compact` response. This
+pair is also emitted when there is too little history to compact. Rejected
+requests, such as a request while the agent is busy or invalid token overrides,
+do not start progress. Manual requests remain available when automatic
+compaction is disabled and do not emit automatic compaction events.
+
+```json
+{"type":"manual_compaction_start"}
+{"type":"manual_compaction_end","result":{"summary":"Retained decisions...","firstKeptEntryId":"entry-kept","tokensBefore":48000,"tokensAfter":12000,"details":{}},"aborted":false}
+{"id":"compact-1","type":"response","command":"compact","success":true,"data":{"summary":"Retained decisions...","firstKeptEntryId":"entry-kept","tokensBefore":48000,"tokensAfter":12000,"details":{}}}
+```
+
+`manual_compaction_end.result` is present only after the resulting context has
+been installed and, for persistent sessions, saved. A skipped pass instead has
+`skipped: true`, `aborted: false`, and an explanatory `errorMessage`; treat this
+as a completed no-op when dismissing progress. Failure has an `errorMessage`
+without a result. Cancellation sets `aborted: true`. The final RPC response for
+a skipped, failed, or cancelled request has `success: false`. No `agent_end` is
+emitted for this maintenance operation.
+
+While the summary is generated, `get_state` reports `isCompacting: true`, and
+the dispatcher continues handling `abort`, state reads, and history reads.
+Aborting before persistence leaves the original history intact. Once a save
+begins, the operation finishes the durable transaction before replying. Closing
+input drains an admitted request through its final response.
+
+The SDK exposes the same progress through session subscribers and the
+callback passed to `AgentSessionHandle::compact` or `shake`. A shake start has
+`mode: "shake"`; a normal compaction start omits `mode`. Subprocess clients can
+use `RpcTransportClient::compact_with_events` and send cancellation through
+`control_handle().abort()` while continuing to poll the compaction request.
+
+### In-place handoff
+
+```json
+{"id":"handoff-1","type":"handoff","focus":"Preserve the migration decisions and remaining failures"}
+```
+
+OMP's `customInstructions` is accepted in place of `focus`. A command that
+sends both is rejected.
+
+Handoff retains the session ID and file, the configured recent-context budget,
+and the latest complete authored turn with its native attachments and tool
+results. It uses the native privacy policy and extension hooks and persists a
+validated candidate before installing it. Automatic compaction settings do not
+disable this manual operation. If all history belongs to the retained span,
+the command fails without calling the provider.
+
+During generation `get_state` reports `isCompacting: true` and
+`isStreaming: false`. The dispatcher continues accepting `abort`,
+`extension_ui_response`, `get_state`, and history reads. New prompts, another
+handoff, session mutations, `get_session_stats`, `export_html`, and queue-mode
+changes are refused until maintenance finishes. A currently running foreground
+bash command also prevents handoff admission.
+
+The server emits `auto_compaction_start` with `reason: "handoff"`, followed by
+`auto_compaction_end`, and then **one terminal response** to the original
+request. There is no early success acknowledgement and no `agent_end` for this
+operation. Successful response data has the compaction result shape:
+
+```json
+{
+  "id":"handoff-1",
+  "type":"response",
+  "command":"handoff",
+  "success":true,
+  "data":{
+    "summary":"Continuation brief...",
+    "firstKeptEntryId":"entry-kept",
+    "tokensBefore":48000,
+    "tokensAfter":12000,
+    "details":{"mode":"handoff"}
+  }
+}
+```
+
+`details` may contain additional native compaction metadata. Token values are
+heuristic estimates. A malformed focus is rejected before session recovery or
+provider work. Provider failure, empty synthesis, cancellation, an unsafe cut,
+or a changed source returns `success: false` with `error` and `errorHints`.
+There is no fallback summary. Persistence failures keep the native quarantine
+and surface as failures; they never authorize a new provider turn.
+
+An `abort` response only acknowledges the cancellation request. Continue
+waiting for the original handoff's terminal response. Cancellation arriving
+after durable installation may still yield success. Closing input drains an
+already admitted handoff through its terminal response before shutdown.
+
 ### State & Config
-- **get_state**: Get current model, settings, token usage.
-- **get_messages**: Get conversation history.
+
+- **get_state**: Get current model, settings, active context estimates, and `outputMode`.
+  - `contextTokens` is always a non-negative integer estimated from the selected
+    branch's active model messages. It excludes hidden pre-compaction and
+    sibling history and is not cumulative provider usage.
+  - `contextWindow` is the resolved model's positive context capacity, or `null`
+    when unknown. Read these values at an idle boundary for context scheduling.
+- **get_messages**: Get conversation history in the negotiated output mode.
+- **get_fork_messages**: Get `{entryId, text}` previews of branchable user messages.
+- **set_output_mode**: Negotiate `full` (default) or `compact` output while idle.
+  - Params: `mode`.
+- **get_attachment**: Read a bounded byte range from an issued attachment ID.
+  - Params: `attachmentId`, `offset` (optional), `maxBytes` (optional).
 - **get_available_models**: List models.
 - **set_model**: Change model.
   - Params: `provider`, `modelId`.
@@ -80,10 +358,23 @@ Communication is via **JSON Lines** over stdin/stdout. Each line must be a valid
 
 ### Extension UI
 - **extension_ui_response**: Reply to a pending extension UI request.
-  - Params: `requestId` (preferred) or legacy alias `id`, plus one of:
+  - Params: echo the `requestGeneration` integer from the matching
+    `extension_ui_request`, provide `requestId` (preferred) or legacy alias
+    `id`, and include one of:
     - `confirmed` (boolean) for `confirm`
     - `value` (string/boolean depending on method) for `select`/`input`/`editor`
     - `cancelled` (`true`) to cancel
+
+### Ask tool (requires `--tools ...,ask`)
+- **ask_response**: Answer a pending `ask_request` event.
+  - Params: `requestId` (or alias `id`), plus one of:
+    - `answers`: array of `{questionId, selected: [labels], other?}` —
+      `selected` holds chosen option labels (several when the question was
+      `multi`); `other` carries a free-text answer instead.
+    - `dismissed` (`true`) to cancel the whole request (the model sees a
+      "user dismissed the question" tool error).
+  - Reply: `{ "resolved": bool }` — `false` when the request already timed
+    out (the tool waits `timeoutMs` from the event, then errors).
 
 ## Events
 
@@ -93,8 +384,34 @@ Communication is via **JSON Lines** over stdin/stdout. Each line must be a valid
 - `tool_execution_start`: Tool execution started.
 - `tool_execution_update`: Streaming tool output.
 - `tool_execution_end`: Tool execution finished.
-- `extension_ui_request`: Extension requested host UI interaction (confirm/select/input/editor/notify/etc.).
+- `extension_ui_request`: Extension requested host UI interaction
+  (confirm/select/input/editor/notify/etc.). Response-bearing events carry a
+  `requestGeneration` correlation token; clients must echo it in
+  `extension_ui_response` so a late response cannot resolve a newer request
+  that reused the same public ID.
+- `ask_request`: The ask tool needs the user to answer question cards.
+  Carries `id`, `questions` (each `{id?, question, header?, options:
+  [{label, description?}], recommended?, multi}`), and `timeoutMs`.
+  Answer with the `ask_response` command.
+- `ask_request_cancelled`: The wait for a published question ended before a
+  client answer, including when an MCP server cancels its form. Carries the
+  original `ask_request` `id`. Dismiss that card and any buffered copy with
+  the same ID; other cards remain active. A late `ask_response` returns
+  `resolved: false`. Normally answered cards do not emit this event.
 - `agent_end`: Turn complete.
 - `auto_retry_start` / `auto_retry_end`: Transient error retries.
 - `auto_compaction_start` / `auto_compaction_end`: Auto-compaction status.
+- `manual_compaction_start` / `manual_compaction_end`: User-requested
+  compaction status, including skipped passes, failure, and cancellation.
 - `extension_error`: Extension event dispatch/runtime error.
+- `error`: Fatal process error (gh #217). Printed exactly once on stdout
+  before a non-zero exit, in both `--mode rpc` and `--mode json`:
+  `{"type":"error","phase":"startup","code":"auth.missing_api_key","message":"…","exit_code":1}`.
+  `phase` is `startup` when the loop never opened (config/auth/state-dir
+  failures) and `run` after it did; `code` is a stable family name
+  (`config`, `session`, `provider`, `auth`, `tool`, `usage`, `extension`,
+  `io`, `json`, `state_store`, `aborted`, `api`, `internal`) or one of the
+  finer `auth.*` / `config.*` diagnostic codes (`auth.missing_api_key`,
+  `auth.no_models_available`, `auth.invalid_api_key`, …). It is not a `response`
+  envelope — there is no request to answer — so clients should treat it as
+  a terminal event.

@@ -83,6 +83,7 @@ fn make_model_entry(provider: &str, model_id: &str) -> ModelEntry {
         reasoning: false,
         input: vec![InputType::Text],
         cost: ModelCost {
+            audio: None,
             input: 0.0,
             output: 0.0,
             cache_read: 0.0,
@@ -148,6 +149,7 @@ fn build_app_with_models_and_config(
         current,
         scope,
         available,
+        None,
         Vec::new(),
         event_tx,
         test_runtime_handle(),
@@ -157,6 +159,7 @@ fn build_app_with_models_and_config(
         Some(KeyBindings::new()),
         Vec::new(),
         Usage::default(),
+        None,
     );
     app.set_terminal_size(80, 24);
     app
@@ -188,6 +191,7 @@ fn strip_suffix_removes_known_levels() {
     assert_eq!(strip_thinking_level_suffix("model:low"), "model");
     assert_eq!(strip_thinking_level_suffix("model:medium"), "model");
     assert_eq!(strip_thinking_level_suffix("model:xhigh"), "model");
+    assert_eq!(strip_thinking_level_suffix("model:max"), "model");
 }
 
 #[test]
@@ -690,6 +694,27 @@ fn cycle_model_backward_wraps_to_end() {
     assert!(
         status.starts_with("Switched model:"),
         "Expected 'Switched model:' but got: {status}"
+    );
+}
+
+/// gh #214: a models.json `name` shows up in the switch message after the
+/// identity, and the identity is what the app actually switched to.
+#[test]
+fn cycle_model_status_names_a_models_json_display_name() {
+    let harness = TestHarness::new("cycle_display_name");
+    let current = make_model_entry("anthropic", "claude-sonnet-4");
+    // A models.json custom entry on a provider this harness can construct.
+    let mut named = make_model_entry("openai", "deepseek-v4-pro");
+    named.model.name = "DeepSeek V4 Pro".to_string();
+    let available = vec![make_model_entry("anthropic", "claude-sonnet-4"), named];
+    let mut app = build_app_with_models(&harness, current, vec![], available);
+
+    app.cycle_model(1);
+
+    let status = get_status(&app).unwrap_or("");
+    assert_eq!(
+        status, "Switched model: openai/deepseek-v4-pro (DeepSeek V4 Pro)",
+        "the display name must follow the provider/id identity"
     );
 }
 

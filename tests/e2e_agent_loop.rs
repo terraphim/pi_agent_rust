@@ -1,3 +1,10 @@
+// Integration tests are separate crates, so the crate-level `recursion_limit`
+// raised in src/lib.rs does not reach here. Proving `Send` for the agent-loop
+// future now exceeds the default 128 — asupersync 0.5.0 nests its runtime
+// future types more deeply than 0.4.4 did — which nightly-2026-08-31 reports
+// as a `future_incompatible` warning and `-D warnings` makes fatal.
+#![recursion_limit = "256"]
+
 //! E2E: full agent loop integration tests (bd-2q00).
 //!
 //! These tests run the real `AgentSession` + `ToolRegistry` loop end-to-end
@@ -97,6 +104,7 @@ impl ScriptedProvider {
                 ..Usage::default()
             },
             stop_reason,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -439,6 +447,7 @@ impl Provider for ContextCaptureProvider {
                 ..Usage::default()
             },
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         };
@@ -482,9 +491,17 @@ const fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionEnd { .. } => "tool_end",
         AgentEvent::AutoCompactionStart { .. } => "auto_compaction_start",
         AgentEvent::AutoCompactionEnd { .. } => "auto_compaction_end",
+        AgentEvent::ManualCompactionStart { .. } => "manual_compaction_start",
+        AgentEvent::ManualCompactionEnd { .. } => "manual_compaction_end",
         AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
         AgentEvent::AutoRetryEnd { .. } => "auto_retry_end",
+        AgentEvent::FailoverStart { .. } => "failover_start",
+        AgentEvent::FailoverEnd { .. } => "failover_end",
+        AgentEvent::PrewalkSwitched { .. } => "prewalk_switched",
         AgentEvent::ExtensionError { .. } => "extension_error",
+        AgentEvent::AdvisorNote { .. } => "advisor_note",
+        AgentEvent::CostWarning { .. } => "cost_warning",
+        AgentEvent::ProviderError { .. } => "provider_error",
     }
 }
 
@@ -699,8 +716,16 @@ fn run_scenario(
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: pi::turn_recovery::TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -986,8 +1011,16 @@ fn context_intelligence_no_mock_harness() {
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: pi::turn_recovery::TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         },
     );
     let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1299,5 +1332,295 @@ fn error_recovery() {
             ctx.push(("total_tokens".into(), outcome.total_tokens.to_string()));
         });
     write_timeline_artifact(&harness, test_name, &outcome.capture);
+    write_jsonl_artifacts(&harness, test_name);
+}
+
+// ─── #126: streaming tool-call arguments must reach RPC/ACP partials ────────
+
+/// #126 regression provider: streams a single tool call's arguments in raw
+/// fragments, the way OpenAI-compatible backends deliver them. Turn 0 streams
+/// `ToolCallStart` → fragmented `ToolCallDelta`s → `ToolCallEnd` → `Done`.
+#[derive(Debug)]
+struct StreamingToolCallProvider {
+    fragments: &'static [&'static str],
+    stream_calls: AtomicUsize,
+}
+
+impl StreamingToolCallProvider {
+    fn full_arguments(&self) -> serde_json::Value {
+        serde_json::from_str(&self.fragments.concat()).expect("fragments join into valid JSON")
+    }
+}
+
+#[async_trait]
+#[allow(clippy::unnecessary_literal_bound)]
+impl Provider for StreamingToolCallProvider {
+    fn name(&self) -> &str {
+        "streaming-tool-call-provider"
+    }
+
+    fn api(&self) -> &str {
+        "scripted-api"
+    }
+
+    fn model_id(&self) -> &str {
+        "scripted-model"
+    }
+
+    async fn stream(
+        &self,
+        _context: &Context<'_>,
+        _options: &StreamOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        let empty_partial = AssistantMessage {
+            content: Vec::new(),
+            api: self.api().to_string(),
+            provider: self.name().to_string(),
+            model: self.model_id().to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            stop_details: None,
+            error_message: None,
+            timestamp: 0,
+        };
+        let tool_call = ToolCall {
+            id: "read-stream-1".to_string(),
+            name: "read".to_string(),
+            arguments: self.full_arguments(),
+            thought_signature: None,
+        };
+        // The agent loop executes the tool call and asks for a follow-up
+        // turn; end the run with plain text so the scenario stays single-tool.
+        if call_index > 0 {
+            let done_message = AssistantMessage {
+                content: vec![ContentBlock::Text(TextContent::new("done streaming"))],
+                stop_reason: StopReason::Stop,
+                stop_details: None,
+                ..empty_partial.clone()
+            };
+            return Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamEvent::Start {
+                    partial: empty_partial,
+                }),
+                Ok(StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message: done_message,
+                }),
+            ])));
+        }
+
+        let final_message = AssistantMessage {
+            content: vec![ContentBlock::ToolCall(tool_call.clone())],
+            stop_reason: StopReason::ToolUse,
+            stop_details: None,
+            ..empty_partial.clone()
+        };
+
+        let mut events = vec![
+            Ok(StreamEvent::Start {
+                partial: empty_partial,
+            }),
+            Ok(StreamEvent::ToolCallStart {
+                content_index: 0,
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+            }),
+        ];
+        for fragment in self.fragments {
+            events.push(Ok(StreamEvent::ToolCallDelta {
+                content_index: 0,
+                delta: (*fragment).to_string(),
+            }));
+        }
+        events.push(Ok(StreamEvent::ToolCallEnd {
+            content_index: 0,
+            tool_call,
+        }));
+        events.push(Ok(StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message: final_message,
+        }));
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+}
+
+/// #126 E2E at the RPC/ACP boundary: the fix for #124 updated the `OpenAI`
+/// provider's INTERNAL partial, but RPC/ACP clients consume the partial the
+/// agent loop rebuilds from `StreamEvent`s — which stayed `Null` on every
+/// `ToolCallDelta`. This test drives the REAL `AgentSession` loop with a
+/// fragment-streaming provider and serializes every emitted `AgentEvent`
+/// exactly as `--mode rpc` does (`serde_json::to_string(&event)`, see
+/// `rpc_agent_event_handler`), then asserts the serialized `message_update`
+/// partials carry progressively-growing tool-call `arguments` mid-stream —
+/// not `Null` until `toolcall_end`.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn rpc_partial_tool_call_arguments_grow_during_stream() {
+    // Fragment boundaries chosen to exercise every completion mode:
+    // mid-string, mid-object after a complete member, dangling `"key` with no
+    // value yet, and the final fully-valid document.
+    const FRAGMENTS: &[&str] = &[
+        "{\"path\": \"streamed",
+        "/demo-fi",
+        "le.txt\", \"line",
+        "\": 30}",
+    ];
+    let test_name = "e2e_agent_loop_rpc_partial_tool_call_arguments";
+    let harness = TestHarness::new(test_name);
+    let cwd = harness.temp_dir().to_path_buf();
+
+    let expected_progression: [serde_json::Value; 4] = [
+        json!({"path": "streamed"}),
+        json!({"path": "streamed/demo-fi"}),
+        json!({"path": "streamed/demo-file.txt"}),
+        json!({"path": "streamed/demo-file.txt", "line": 30}),
+    ];
+
+    let serialized_events = run_async(async move {
+        let provider: Arc<dyn Provider> = Arc::new(StreamingToolCallProvider {
+            fragments: FRAGMENTS,
+            stream_calls: AtomicUsize::new(0),
+        });
+        let tools = ToolRegistry::new(&tool_names(), &cwd, None);
+        let config = AgentConfig {
+            system_prompt: None,
+            max_tool_iterations: 2,
+            stream_options: StreamOptions {
+                api_key: Some("test-key".to_string()),
+                ..StreamOptions::default()
+            },
+            block_images: false,
+            model_accepts_images: true,
+            fail_closed_hooks: false,
+            tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: pi::turn_recovery::TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
+        };
+        let agent = Agent::new(provider, tools, config);
+        let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
+            Some(cwd.clone()),
+        )));
+        let mut agent_session = AgentSession::new(
+            agent,
+            Arc::clone(&session),
+            true,
+            ResolvedCompactionSettings::default(),
+        );
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_ref = Arc::clone(&captured);
+        agent_session
+            .run_text("stream a large tool call".to_string(), move |event| {
+                // Serialize at capture time, exactly like the RPC surface does
+                // (`rpc_agent_event_handler`): what lands in this string is
+                // byte-for-byte what an RPC client reads off stdout.
+                let line = serde_json::to_string(&event).expect("serialize agent event");
+                let mut guard = match captured_ref.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.push(line);
+            })
+            .await
+            .expect("run streaming tool-call scenario");
+
+        let guard = match captured.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    });
+
+    let events: Vec<serde_json::Value> = serialized_events
+        .iter()
+        .map(|line| serde_json::from_str(line).expect("captured event is valid JSON"))
+        .collect();
+
+    let tool_call_deltas: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "message_update"
+                && event["assistantMessageEvent"]["type"] == "toolcall_delta"
+        })
+        .collect();
+    assert_eq!(
+        tool_call_deltas.len(),
+        FRAGMENTS.len(),
+        "expected one message_update per streamed fragment"
+    );
+
+    for (idx, (update, expected)) in tool_call_deltas
+        .iter()
+        .zip(expected_progression.iter())
+        .enumerate()
+    {
+        for (label, args) in [
+            ("message", &update["message"]["content"][0]["arguments"]),
+            (
+                "assistantMessageEvent.partial",
+                &update["assistantMessageEvent"]["partial"]["content"][0]["arguments"],
+            ),
+        ] {
+            assert!(
+                !args.is_null(),
+                "delta {idx}: {label} arguments must not be Null mid-stream \
+                 (the #126 regression: RPC/ACP clients saw Null on every delta)"
+            );
+            assert_eq!(
+                args, expected,
+                "delta {idx}: {label} arguments should be the best-effort \
+                 completion of the accumulated fragment prefix"
+            );
+        }
+
+        // #129: the correlation key must be present on EVERY mid-stream
+        // partial, not only at toolcall_end — snapshot clients key the
+        // growing preview by tool-call id.
+        for (label, block) in [
+            ("message", &update["message"]["content"][0]),
+            (
+                "assistantMessageEvent.partial",
+                &update["assistantMessageEvent"]["partial"]["content"][0],
+            ),
+        ] {
+            assert_eq!(
+                block["id"], "read-stream-1",
+                "delta {idx}: {label} tool-call id must be populated mid-stream \
+                 (the #129 regression: id stayed \"\" until toolcall_end)"
+            );
+            assert_eq!(
+                block["name"], "read",
+                "delta {idx}: {label} tool-call name must be populated mid-stream \
+                 (the #129 regression: name stayed \"\" until toolcall_end)"
+            );
+        }
+    }
+
+    // The terminal event still carries the fully-parsed arguments.
+    let tool_call_end = events
+        .iter()
+        .find(|event| {
+            event["type"] == "message_update"
+                && event["assistantMessageEvent"]["type"] == "toolcall_end"
+        })
+        .expect("toolcall_end message_update present");
+    assert_eq!(
+        tool_call_end["message"]["content"][0]["arguments"], expected_progression[3],
+        "toolcall_end partial carries the final fully-parsed arguments"
+    );
+
+    harness.log().info_ctx(
+        "summary",
+        "rpc partial tool-call streaming verified",
+        |ctx| {
+            ctx.push(("delta_updates".into(), tool_call_deltas.len().to_string()));
+        },
+    );
     write_jsonl_artifacts(&harness, test_name);
 }

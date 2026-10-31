@@ -1,0 +1,92 @@
+# Portable DSR registry entry for pi_agent_rust.
+#
+# Doodlestein Self-Releaser (dsr) is the only quality/build/release authority
+# for this repository (AGENTS.md "Build, Quality, and Release Authority").
+# `dsr quality` reads its checks from the registry file only, so a host whose
+# ~/.config/dsr/repos.yaml lacks this entry cannot run the gate at all. This
+# file makes the recipe part of the source tree:
+#
+#   # one-off, no registry merge:
+#   DSR_REPOS_FILE=.dsr/repos.yaml dsr quality --tool pi_agent_rust
+#
+#   # or merge it into the host registry once (yq >= 4):
+#   yq -i '.tools.pi_agent_rust = load(".dsr/repos.yaml").tools.pi_agent_rust' \
+#     ~/.config/dsr/repos.yaml
+#
+# Cross-platform builds/releases still need the per-host build authority in
+# ~/.config/dsr/repos.d/pi_agent_rust.yaml on the release operator's machine
+# (docs/releasing.md "Canonical DSR release lane"); the keys below are the
+# registry subset and must stay identical to that file where they overlap.
+#
+# Check list = AGENTS.md "Compiler and Test Checks". Cargo runs through rch so
+# a shared swarm host never compiles locally; rch owns the remote target dir
+# (docs/perf-budgets-recipe.md section 3 explains why the old
+# /tmp/pi-agent-rust-dsr hardcode was dropped). RCH_REQUIRE_REMOTE=1 is rch's
+# fail-closed proof mode: if no worker can take the job the check fails
+# instead of rch silently compiling on the local host (which happened on
+# 2026-09-01 when the checkout lived under a path rch could not normalize).
+# RCH_FORCE_REMOTE, used by older scripts, still fails open. The timeout
+# overrides cover a cold all-targets check/test of this crate; rch's defaults
+# (300 s build / 1800 s test) are too small for it. `--no-fail-fast` makes
+# cargo run every test binary and report all failures in one run instead of
+# stopping at the first red binary; the check still fails on any failure.
+# Without it the integration/conformance binaries never executed while the
+# lib binary carried pre-existing failures (runs 3-6, 2026-09-01/02).
+# `env TMPDIR=/tmp` runs the tests against the worker's /tmp instead of the
+# project-local `.rch-tmp` that rch exports as TMPDIR: on some workers that
+# directory is owned by a different uid than the test process, and pi's
+# mode-class checks (src/platform.rs, deliberately no root DAC bypass) then
+# deny every temp-dir write (run7, 2026-09-02: 370+ session/tools failures
+# with "Unix group mode class 1700 on .../.rch-tmp does not allow path
+# traversal"). /tmp is owned by root on every worker.
+#
+# `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0` bound the target dir so the
+# test lane can actually finish on a shared worker. This crate builds 100+
+# test binaries under `--all-targets`, and its debug target tree measured
+# 72 GB on vmi1227854 (2026-09-09). Fleet workers sit at 89-100% full, so the
+# lane kept dying part-way through with
+#   couldn't create a temp dir: No space left on device (os error 28)
+# and, on a worker that filled completely mid-link,
+#   collect2: fatal error: ld terminated with signal 7 [Bus error]
+# which is a memory-mapped write hitting a full filesystem, not a code fault.
+# Dropping test debuginfo removes the bulk of that tree. Every sibling project
+# on this fleet already does something equivalent: frankenterm runs with
+# CARGO_INCREMENTAL=0 and CARGO_PROFILE_TEST_DEBUG=0, and frankensqlite,
+# frankensim and eidetic_engine_cli all scope to specific packages/tests
+# rather than building every target. The cost is that panic backtraces carry
+# symbol names but not line numbers; re-run a failing binary locally with the
+# default profile when a line number is actually needed. See bd-0iw92.
+
+schema_version: "1.0.0"
+
+tools:
+  pi_agent_rust:
+    repo: Dicklesworthstone/pi_agent_rust
+    local_path: /data/projects/pi_agent_rust
+    language: rust
+    binary_name: pi
+    targets:
+      - linux/amd64
+      - linux/arm64
+      - darwin/amd64
+      - darwin/arm64
+      - windows/amd64
+    checks:
+      - cargo fmt --check
+      - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 CARGO_BUILD_JOBS=2 rch exec -- cargo check --locked --all-targets
+      - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 CARGO_BUILD_JOBS=2 rch exec -- cargo clippy --locked --all-targets -- -D warnings
+      # PI_PROVIDER_REPLAY_GIT_COMMIT is passed because rch does not ship a
+      # usable .git to the worker (its exclude_patterns drop .git/index,
+      # .git/objects/ and friends), so the provider replay-lineage checks
+      # cannot resolve an authoritative commit and refuse with
+      # `ambiguous_git_commit` — 50 of the ~106 failures this lane used to
+      # report. The substitution runs on the operator host, where HEAD is real.
+      # See bd-0ngnq and the usage note at the top of tests/provider_streaming.rs.
+      - RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=3600 RCH_TEST_TIMEOUT_SEC=7200 CARGO_BUILD_JOBS=2 rch exec -- env TMPDIR=/tmp CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 PI_PROVIDER_REPLAY_GIT_COMMIT="$(git rev-parse HEAD)" cargo test --locked --all-targets --no-fail-fast
+      - bash tests/installer_regression.sh
+      - python3 scripts/check_module_reachability.py
+      # Eleven loopback fixtures treated a socket read timeout as an error and
+      # lost seven tests from a full darwin run before anyone looked; the
+      # pattern then reappeared in two modules written after they were fixed.
+      # Seconds to run, and it is the only thing that stops a twelfth.
+      - python3 scripts/check_fixture_read_patience.py

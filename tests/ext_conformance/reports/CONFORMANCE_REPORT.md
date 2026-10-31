@@ -1,17 +1,17 @@
 # Extension Conformance Report
 
-> Generated: 2026-05-12T19:26:24Z
+> Generated: 2026-09-18T18:41:24Z
 
 ## Summary
 
 | Metric | Value |
 |----|----|
-| Total extensions | 224 |
+| Total extensions | 227 |
 | PASS | 60 |
 | FAIL | 0 |
-| N/A (not yet tested) | 164 |
+| N/A (not yet tested) | 167 |
 | Pass rate (tested only) | 100.0% |
-| Coverage (tested/total) | 26.8% |
+| Coverage (tested/total) | 26.4% |
 | Policy negative tests | 30 pass, 0 fail |
 | Source tiers | 5 |
 
@@ -173,7 +173,7 @@
 
 ## official-pi-mono
 
-66 extensions (60 pass, 0 fail, 6 untested)
+68 extensions (60 pass, 0 fail, 8 untested)
 
 | Extension | Version | Tier | Status | Evidence | Load (Rust) | Scenarios | Failures |
 |---|---|---|---|---|---|---|---|
@@ -212,6 +212,8 @@
 | [`overlay-qa-tests`](tests/ext_conformance/artifacts/overlay-qa-tests/overlay-qa-tests.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/overlay-qa-tests.json) | 118ms | - |  |
 | [`overlay-test`](tests/ext_conformance/artifacts/overlay-test/overlay-test.ts) | - | T1 (simple single-file) | PASS | [fixture](tests/ext_conformance/fixtures/overlay-test.json) | 103ms | - |  |
 | [`permission-gate`](tests/ext_conformance/artifacts/permission-gate/permission-gate.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/permission-gate.json) [smoke](tests/ext_conformance/reports/extensions/permission-gate.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/permission-gate.jsonl) | 102ms | 2/2 pass |  |
+| [`pi_ai_fail_closed`](tests/ext_conformance/artifacts/pi_ai_fail_closed/pi_ai_fail_closed.ts) | - | T1 (simple single-file) | N/A | [fixture](tests/ext_conformance/fixtures/pi_ai_fail_closed.json) | - | - |  |
+| [`pi_ai_provider_bridge`](tests/ext_conformance/artifacts/pi_ai_provider_bridge/pi_ai_provider_bridge.ts) | - | T1 (simple single-file) | N/A | [fixture](tests/ext_conformance/fixtures/pi_ai_provider_bridge.json) | - | - |  |
 | [`pirate`](tests/ext_conformance/artifacts/pirate/pirate.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/pirate.json) | 98ms | - |  |
 | [`plan-mode`](tests/ext_conformance/artifacts/plan-mode/index.ts) | - | T3 (multi-file) | PASS | [fixture](tests/ext_conformance/fixtures/plan-mode.json) [smoke](tests/ext_conformance/reports/extensions/plan-mode.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/plan-mode.jsonl) | 109ms | 3/3 pass |  |
 | [`preset`](tests/ext_conformance/artifacts/preset/preset.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/preset.json) | 113ms | - |  |
@@ -246,7 +248,7 @@
 
 ## third-party-github
 
-23 extensions (0 pass, 0 fail, 23 untested)
+24 extensions (0 pass, 0 fail, 24 untested)
 
 | Extension | Version | Tier | Status | Evidence | Load (Rust) | Scenarios | Failures |
 |---|---|---|---|---|---|---|---|
@@ -259,6 +261,7 @@
 | [`third-party/jyaunches-pi-canvas`](tests/ext_conformance/artifacts/third-party/jyaunches-pi-canvas/index.ts) | `0.2.0` | T2 (multi-registration) | N/A | - | - | - |  |
 | [`third-party/kcosr-pi-extensions`](tests/ext_conformance/artifacts/third-party/kcosr-pi-extensions/apply-patch-tool/index.ts) | - | T5 (exec/network) | N/A | - | - | - |  |
 | [`third-party/limouren-agent-things`](tests/ext_conformance/artifacts/third-party/limouren-agent-things/sandbox/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
+| [`third-party/lll9p-pi-better-compaction`](tests/ext_conformance/artifacts/third-party/lll9p-pi-better-compaction/pi-better-compaction/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`third-party/lsj5031-pi-notification-extension`](tests/ext_conformance/artifacts/third-party/lsj5031-pi-notification-extension/notification.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
 | [`third-party/marckrenn-pi-sub`](tests/ext_conformance/artifacts/third-party/marckrenn-pi-sub/sub-bar/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`third-party/michalvavra-agents`](tests/ext_conformance/artifacts/third-party/michalvavra-agents/bell.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
@@ -278,7 +281,7 @@
 
 | Evidence Type | Count | Location |
 |---|---|---|
-| Golden fixtures | 60 | `tests/ext_conformance/fixtures/*.json` |
+| Golden fixtures | 62 | `tests/ext_conformance/fixtures/*.json` |
 | Smoke test logs | 16 | `tests/ext_conformance/reports/extensions/` (legacy fallback: `tests/ext_conformance/reports/smoke/extensions/`) |
 | Parity diff logs | 16 | `tests/ext_conformance/reports/parity/extensions/` |
 | Load time benchmarks | 60 | `tests/ext_conformance/reports/load_time_benchmark.json` |
@@ -286,9 +289,9 @@
 
 ## Coverage Gaps
 
-164 extensions have not been tested yet.
+167 extensions have not been tested yet.
 
-**Multi-file extension (T3)** (85 extensions):
+**Multi-file extension (T3)** (86 extensions):
 - `base_fixtures`
 - `community/jyaunches-canvas`
 - `community/nicobailon-interactive-shell`
@@ -366,6 +369,7 @@
 - `third-party/charles-cooper-pi-extensions`
 - `third-party/cv-pi-ssh-remote`
 - `third-party/limouren-agent-things`
+- `third-party/lll9p-pi-better-compaction`
 - `third-party/marckrenn-pi-sub`
 - `third-party/michalvavra-agents`
 - `third-party/openclaw-openclaw`
@@ -375,7 +379,7 @@
 - `third-party/w-winter-dot314`
 - `third-party/zenobi-us-pi-dcp`
 
-**Not yet scheduled** (71 extensions):
+**Not yet scheduled** (73 extensions):
 - `community/ferologics-notify`
 - `community/hjanuschka-clipboard`
 - `community/hjanuschka-cost-tracker`
@@ -437,6 +441,8 @@
 - `npm/pi-voice-of-god`
 - `npm/token-rate-pi`
 - `npm/vpellegrino-pi-skills`
+- `pi_ai_fail_closed`
+- `pi_ai_provider_bridge`
 - `prompt-url-widget`
 - `redraws`
 - `third-party/graffioh-pi-screenshots-picker`
@@ -471,7 +477,7 @@ cargo test --test ext_conformance_scenarios --features ext-conformance
 cargo test --test extensions_policy_negative
 
 # 2. Generate this consolidated report
-cargo test --test conformance_report generate_conformance_report -- --nocapture
+PI_GENERATE_CONFORMANCE_REPORT=1 cargo test --locked --test conformance_report generate_conformance_report -- --exact --nocapture
 ```
 
 Report files:

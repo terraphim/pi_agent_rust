@@ -58,6 +58,7 @@ fn custom_model_entry(provider: &str, api_key: Option<&str>) -> ModelEntry {
             reasoning: true,
             input: vec![InputType::Text],
             cost: ModelCost {
+                audio: None,
                 input: 0.0,
                 output: 0.0,
                 cache_read: 0.0,
@@ -413,6 +414,8 @@ fn build_system_prompt_includes_custom_append_context_and_skills() {
         &package_dir,
         false,
         true,
+        None,
+        &Config::default(),
     )
     .expect("build system prompt");
 
@@ -463,6 +466,8 @@ fn build_system_prompt_test_mode_suppresses_ambient_project_context() {
         &package_dir,
         true,
         true,
+        None,
+        &Config::default(),
     )
     .expect("build system prompt");
 
@@ -475,6 +480,75 @@ fn build_system_prompt_test_mode_suppresses_ambient_project_context() {
     assert!(prompt.contains("Current working directory: <CWD>"));
 }
 
+/// gh #216: `--no-context-files` suppresses AGENTS.md / CLAUDE.md discovery
+/// (global dir, cwd, and every ancestor) outside test mode, while skills and
+/// the custom/append prompts still apply. `--no-skills` alone does not.
+#[test]
+fn build_system_prompt_no_context_files_flag_suppresses_ambient_project_context() {
+    let harness =
+        TestHarness::new("build_system_prompt_no_context_files_flag_suppresses_ambient_context");
+    let global_dir = harness.create_dir("global-no-context-files");
+    harness.create_file("global-no-context-files/CLAUDE.md", "GLOBAL\n");
+
+    let project_dir = harness.create_dir("project-no-context-files");
+    std::fs::create_dir_all(project_dir.join("sub")).expect("create project/sub");
+    std::fs::write(project_dir.join("AGENTS.md"), "ROOT\n").expect("write project AGENTS");
+    std::fs::write(project_dir.join("sub").join("AGENTS.md"), "SUB\n").expect("write sub AGENTS");
+    let package_dir = harness.create_dir("package-no-context-files");
+    let skills_prompt = "\n\n# Skills\n- foo\n";
+
+    // `--no-skills` by itself must leave context-file discovery untouched.
+    let cli = cli::Cli::parse_from(["pi", "--system-prompt", "CUSTOM PROMPT", "--no-skills"]);
+    let prompt = build_system_prompt(
+        &cli,
+        &project_dir.join("sub"),
+        &["read"],
+        Some(skills_prompt),
+        &global_dir,
+        &package_dir,
+        false,
+        true,
+        None,
+        &Config::default(),
+    )
+    .expect("build system prompt");
+    assert!(prompt.contains("# Project Context"));
+    assert!(prompt.contains("GLOBAL"));
+    assert!(prompt.contains("ROOT"));
+    assert!(prompt.contains("SUB"));
+
+    let cli = cli::Cli::parse_from([
+        "pi",
+        "--system-prompt",
+        "CUSTOM PROMPT",
+        "--append-system-prompt",
+        "APPEND PROMPT",
+        "--no-context-files",
+    ]);
+    let prompt = build_system_prompt(
+        &cli,
+        &project_dir.join("sub"),
+        &["read"],
+        Some(skills_prompt),
+        &global_dir,
+        &package_dir,
+        false,
+        true,
+        None,
+        &Config::default(),
+    )
+    .expect("build system prompt");
+
+    assert!(prompt.contains("CUSTOM PROMPT"));
+    assert!(prompt.contains("APPEND PROMPT"));
+    assert!(prompt.contains("# Skills"));
+    assert!(!prompt.contains("# Project Context"));
+    assert!(!prompt.contains("GLOBAL"));
+    assert!(!prompt.contains("ROOT"));
+    assert!(!prompt.contains("SUB"));
+    assert!(prompt.contains("Current date and time:"));
+}
+
 #[test]
 fn prepare_initial_message_wraps_files_and_appends_first_message() {
     let harness = TestHarness::new("prepare_initial_message_wraps_files_and_appends_first_message");
@@ -482,13 +556,19 @@ fn prepare_initial_message_wraps_files_and_appends_first_message() {
     let mut messages = vec!["please review".to_string()];
     let file_args = vec![file_path.to_string_lossy().to_string()];
 
-    let initial = prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false)
-        .expect("prepare initial")
-        .expect("initial message present");
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare initial")
+    .expect("initial message present");
 
     harness.log().info_ctx("result", "Initial message", |ctx| {
         ctx.push(("text_len".into(), initial.text.len().to_string()));
-        ctx.push(("images".into(), initial.images.len().to_string()));
+        ctx.push(("attachments".into(), initial.attachments.len().to_string()));
     });
 
     assert!(messages.is_empty());
@@ -530,6 +610,8 @@ fn build_system_prompt_rejects_unreadable_system_prompt_path() {
         &package_dir,
         true,
         true,
+        None,
+        &Config::default(),
     )
     .expect_err("directory path should not become literal prompt text");
 
@@ -561,6 +643,8 @@ fn build_system_prompt_rejects_unreadable_append_prompt_path() {
         &package_dir,
         true,
         true,
+        None,
+        &Config::default(),
     )
     .expect_err("directory path should not become literal append prompt text");
 
@@ -578,9 +662,15 @@ fn prepare_initial_message_leaves_remaining_messages() {
     let mut messages = vec!["first".to_string(), "second".to_string()];
     let file_args = vec![file_path.to_string_lossy().to_string()];
 
-    let initial = prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false)
-        .expect("prepare initial")
-        .expect("initial message present");
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare initial")
+    .expect("initial message present");
 
     assert_eq!(messages, vec!["second".to_string()]);
     assert!(initial.text.contains("first"));
@@ -599,15 +689,21 @@ fn prepare_initial_message_attaches_images_and_builds_content_blocks() {
     let mut messages = Vec::new();
     let file_args = vec![image_path.to_string_lossy().to_string()];
 
-    let initial = prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false)
-        .expect("prepare initial")
-        .expect("initial message present");
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare initial")
+    .expect("initial message present");
 
     harness
         .log()
         .info_ctx("result", "Image initial message", |ctx| {
             ctx.push(("text_len".into(), initial.text.len().to_string()));
-            ctx.push(("images".into(), initial.images.len().to_string()));
+            ctx.push(("attachments".into(), initial.attachments.len().to_string()));
             ctx.push(("path".into(), image_path.display().to_string()));
         });
 
@@ -616,9 +712,11 @@ fn prepare_initial_message_attaches_images_and_builds_content_blocks() {
             .text
             .contains(&format!("<file name=\"{}\"></file>", image_path.display()))
     );
-    assert_eq!(initial.images.len(), 1);
-    assert_eq!(initial.images[0].mime_type, "image/png");
-    assert!(!initial.images[0].data.is_empty());
+    let [ContentBlock::Image(image)] = initial.attachments.as_slice() else {
+        panic!("expected one image attachment");
+    };
+    assert_eq!(image.mime_type, "image/png");
+    assert!(!image.data.is_empty());
 
     let blocks = build_initial_content(&initial);
     assert_eq!(blocks.len(), 2);
@@ -630,8 +728,13 @@ fn prepare_initial_message_attaches_images_and_builds_content_blocks() {
 fn process_file_arguments_missing_file_reports_error() {
     let harness = TestHarness::new("process_file_arguments_missing_file_reports_error");
     let args = vec!["missing.txt".to_string()];
-    let err = process_file_arguments(&args, harness.temp_dir(), false)
-        .expect_err("missing file should error");
+    let err = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect_err("missing file should error");
     assert!(err.to_string().contains("Cannot access file"));
 }
 
@@ -645,9 +748,17 @@ fn process_file_arguments_small_image_respects_auto_resize_flag() {
     let image_path = harness.create_file("image.png", &bytes);
     let args = vec![image_path.to_string_lossy().to_string()];
 
-    let processed =
-        process_file_arguments(&args, harness.temp_dir(), true).expect("process file arguments");
-    assert_eq!(processed.images.len(), 1);
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        true,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("process file arguments");
+    assert!(matches!(
+        processed.attachments.as_slice(),
+        [ContentBlock::Image(_)]
+    ));
     assert!(
         processed
             .text
@@ -656,19 +767,19 @@ fn process_file_arguments_small_image_respects_auto_resize_flag() {
 }
 
 #[test]
-fn apply_piped_stdin_inserts_message_and_sets_print() {
+fn apply_piped_stdin_returns_input_and_sets_print() {
     let mut cli = cli::Cli::parse_from(["pi", "hello", "world"]);
-    apply_piped_stdin(&mut cli, Some("stdin".to_string()));
+    let input = apply_piped_stdin(&mut cli, Some("stdin".to_string()));
 
     assert!(cli.print);
-    let messages = cli.message_args();
-    assert_eq!(messages, vec!["stdin", "hello", "world"]);
+    assert_eq!(input.as_deref(), Some("stdin"));
+    assert_eq!(cli.message_args(), vec!["hello", "world"]);
 }
 
 #[test]
 fn apply_piped_stdin_none_keeps_args() {
     let mut cli = cli::Cli::parse_from(["pi", "hello"]);
-    apply_piped_stdin(&mut cli, None);
+    assert!(apply_piped_stdin(&mut cli, None).is_none());
     assert!(!cli.print);
     assert_eq!(cli.message_args(), vec!["hello"]);
 }
@@ -747,8 +858,14 @@ fn resolve_api_key_precedence_and_error_paths() {
 fn prepare_initial_message_no_files_returns_none() {
     let harness = TestHarness::new("prepare_initial_message_no_files_returns_none");
     let mut messages = vec!["hello".to_string()];
-    let result =
-        prepare_initial_message(harness.temp_dir(), &[], &mut messages, false).expect("ok");
+    let result = prepare_initial_message(
+        harness.temp_dir(),
+        &[],
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
     assert!(result.is_none());
     // messages are untouched when no file args
     assert_eq!(messages, vec!["hello".to_string()]);
@@ -761,9 +878,15 @@ fn prepare_initial_message_files_only_no_messages() {
     let mut messages: Vec<String> = Vec::new();
     let file_args = vec![file_path.to_string_lossy().to_string()];
 
-    let initial = prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false)
-        .expect("prepare initial")
-        .expect("initial message present");
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare initial")
+    .expect("initial message present");
 
     assert!(initial.text.contains("payload"));
     assert!(initial.text.contains("<file name=\""));
@@ -777,9 +900,15 @@ fn prepare_initial_message_empty_file_returns_none() {
     let mut messages: Vec<String> = Vec::new();
     let file_args = vec![file_path.to_string_lossy().to_string()];
 
-    let result =
-        prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false).expect("ok");
-    // Empty file produces no text and no images → returns None
+    let result = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
+    // Empty file produces no text and no attachments → returns None
     assert!(result.is_none());
 }
 
@@ -794,12 +923,18 @@ fn process_file_arguments_multiple_text_files() {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let processed = process_file_arguments(&args, harness.temp_dir(), false).expect("ok");
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
 
     assert!(processed.text.contains("alpha"));
     assert!(processed.text.contains("bravo"));
     assert!(processed.text.contains("charlie"));
-    assert_eq!(processed.images.len(), 0);
+    assert!(processed.attachments.is_empty());
 
     // Each file gets its own <file> tag
     let file_tag_count = processed.text.matches("<file name=\"").count();
@@ -816,12 +951,55 @@ fn process_file_arguments_empty_file_skipped() {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let processed = process_file_arguments(&args, harness.temp_dir(), false).expect("ok");
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
 
     assert!(processed.text.contains("content"));
     // Only non-empty file gets a <file> tag
     let file_tag_count = processed.text.matches("<file name=\"").count();
     assert_eq!(file_tag_count, 1);
+}
+
+/// Binary files used to be decoded lossily and inlined: up to a megabyte of
+/// replacement characters in the prompt.
+#[test]
+fn process_file_arguments_binary_file_gets_a_notice() {
+    let harness = TestHarness::new("process_file_arguments_binary_file_gets_a_notice");
+    let mut bytes = b"\x7fELF\x02\x01\x01\x00".to_vec();
+    bytes.extend(std::iter::repeat_n(0xff_u8, 4096));
+    let binary = harness.create_file("tool.bin", &bytes);
+    // A multibyte character cut off by the 8 KiB sniff window is still text.
+    let mut text = "a".repeat(8191);
+    text.push_str("é and more\n");
+    let utf8 = harness.create_file("wide.txt", &text);
+    let args = [&binary, &utf8]
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
+
+    assert!(
+        processed.text.contains(&format!(
+            "[Binary file ({} bytes), not included.]",
+            bytes.len()
+        )),
+        "{}",
+        processed.text
+    ); // ubs:ignore[rust.panic.assert-macros] -- test assertion
+    assert!(!processed.text.contains('\u{FFFD}')); // ubs:ignore[rust.panic.assert-macros] -- test assertion
+    assert!(processed.text.contains("é and more")); // ubs:ignore[rust.panic.assert-macros] -- test assertion
 }
 
 #[test]
@@ -839,14 +1017,308 @@ fn process_file_arguments_mixed_text_and_image() {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let processed = process_file_arguments(&args, harness.temp_dir(), false).expect("ok");
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
 
     assert!(processed.text.contains("some notes"));
-    assert_eq!(processed.images.len(), 1);
-    assert_eq!(processed.images[0].mime_type, "image/png");
+    assert!(matches!(
+        processed.attachments.as_slice(),
+        [ContentBlock::Image(image)] if image.mime_type == "image/png"
+    ));
     // Both files produce <file> tags
     let file_tag_count = processed.text.matches("<file name=\"").count();
     assert_eq!(file_tag_count, 2);
+}
+
+#[test]
+fn prepare_initial_message_preserves_mixed_media_and_image_order() {
+    let harness = TestHarness::new("prepare_initial_message_preserves_mixed_media_and_image_order");
+    let png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAA7x2FoAAAAASUVORK5CYII=";
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(png_base64)
+        .expect("decode png");
+    let audio_bytes = b"RIFF\x00\xffWAVEbinary-audio";
+    let video_bytes = b"\x00\x00\x00\x18ftypisom\xff\x80binary-video";
+    let audio = harness.create_file("recording.WAV", audio_bytes);
+    let notes = harness.create_file("notes.txt", "Review both recordings and the image.\n");
+    let image = harness.create_file("image.png", &png);
+    let video = harness.create_file("clip.MP4", video_bytes);
+    let args: Vec<String> = [&audio, &notes, &image, &video]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let mut messages = vec![
+        "Describe the differences.".to_string(),
+        "Then summarize.".to_string(),
+    ];
+
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare mixed attachments")
+    .expect("attachments create an initial message");
+    let blocks = build_initial_content(&initial);
+    let [
+        ContentBlock::Text(text),
+        ContentBlock::Media(audio),
+        ContentBlock::Image(image),
+        ContentBlock::Media(video),
+    ] = blocks.as_slice()
+    else {
+        panic!("text prefix must be followed by media and images in argument order");
+    };
+    assert!(text.text.contains("Review both recordings and the image."));
+    assert!(text.text.contains("Describe the differences."));
+    assert!(!text.text.contains("binary-audio"));
+    assert!(!text.text.contains("binary-video"));
+    assert!(!text.text.contains('\u{fffd}'));
+    assert_eq!(text.text.matches("<file name=\"").count(), 4);
+    assert_eq!(messages, vec!["Then summarize.".to_string()]);
+    assert_eq!(initial.attachments.len(), 3);
+    assert_eq!(audio.mime_type, "audio/wav");
+    assert_eq!(audio.name.as_deref(), Some("recording.WAV"));
+    assert_eq!(video.mime_type, "video/mp4");
+    assert_eq!(video.name.as_deref(), Some("clip.MP4"));
+    assert_eq!(image.mime_type, "image/png");
+    for (data, expected) in [
+        (&audio.data, audio_bytes.as_slice()),
+        (&image.data, png.as_slice()),
+        (&video.data, video_bytes.as_slice()),
+    ] {
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .expect("attachment must contain valid base64"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn process_file_arguments_recognizes_all_media_extensions_case_insensitively() {
+    let harness = TestHarness::new(
+        "process_file_arguments_recognizes_all_media_extensions_case_insensitively",
+    );
+    let cases = [
+        ("clip.MP4", "video/mp4"),
+        ("clip.WebM", "video/webm"),
+        ("clip.MOV", "video/mov"),
+        ("audio.MP3", "audio/mpeg"),
+        ("audio.WaV", "audio/wav"),
+        ("audio.M4A", "audio/m4a"),
+        ("audio.OGG", "audio/ogg"),
+        ("audio.FLAC", "audio/flac"),
+    ];
+    let bytes = [0x00, 0xff, 0x80, 0x01, 0xfe];
+    let args: Vec<String> = cases
+        .iter()
+        .map(|(name, _)| {
+            harness
+                .create_file(*name, bytes)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("attach supported media extensions");
+
+    assert_eq!(processed.attachments.len(), cases.len());
+    assert!(!processed.text.contains('\u{fffd}'));
+    for (block, (name, mime_type)) in processed.attachments.iter().zip(cases) {
+        let ContentBlock::Media(media) = block else {
+            panic!("{name} must be native media, not text or an image");
+        };
+        assert_eq!(media.mime_type, mime_type);
+        assert_eq!(media.name.as_deref(), Some(name));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&media.data)
+                .expect("decode attached bytes"),
+            bytes
+        );
+    }
+}
+
+#[test]
+fn process_file_arguments_skips_empty_media_and_reports_oversized_media() {
+    let harness =
+        TestHarness::new("process_file_arguments_skips_empty_media_and_reports_oversized_media");
+    let empty = harness.create_file("empty.WAV", "");
+    let oversized = harness.temp_path("too-large.mp4");
+    std::fs::File::create(&oversized)
+        .expect("create oversized media")
+        .set_len(pi::media_tools::DEFAULT_MEDIA_MAX_BYTES + 1)
+        .expect("size oversized media");
+    let valid = harness.create_file("small.ogg", [0, 0xff, 1]);
+    let args: Vec<String> = [&empty, &oversized, &valid]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("skip inadmissible media without losing subsequent files");
+
+    let [ContentBlock::Media(media)] = processed.attachments.as_slice() else {
+        panic!("only the nonempty media file below the cap may attach");
+    };
+    assert_eq!(media.name.as_deref(), Some("small.ogg"));
+    assert!(processed.text.contains("too-large.mp4"));
+    assert!(processed.text.contains(&format!(
+        "Max allowed is {} bytes",
+        pi::media_tools::DEFAULT_MEDIA_MAX_BYTES
+    )));
+    assert!(!processed.text.contains("empty.WAV"));
+    assert_eq!(processed.text.matches("<file name=\"").count(), 2);
+
+    let empty_only = process_file_arguments(
+        &[empty.to_string_lossy().into_owned()],
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("empty media follows empty-file behavior");
+    assert!(empty_only.text.is_empty());
+    assert!(empty_only.attachments.is_empty());
+}
+
+#[test]
+fn process_file_arguments_accepts_media_at_the_exact_inline_byte_cap() {
+    let harness =
+        TestHarness::new("process_file_arguments_accepts_media_at_the_exact_inline_byte_cap");
+    let cap = usize::try_from(pi::media_tools::DEFAULT_MEDIA_MAX_BYTES).expect("inline cap fits");
+    let bytes = vec![0xff; cap];
+    let path = harness.create_file("at-limit.flac", &bytes);
+    let processed = process_file_arguments(
+        &[path.to_string_lossy().into_owned()],
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("the inclusive media cap permits exactly that many bytes");
+
+    let [ContentBlock::Media(media)] = processed.attachments.as_slice() else {
+        panic!("media at the cap must attach");
+    };
+    assert_eq!(media.mime_type, "audio/flac");
+    assert_eq!(
+        media.decoded_size_bytes(),
+        pi::media_tools::DEFAULT_MEDIA_MAX_BYTES
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&media.data)
+            .expect("decode full media"),
+        bytes
+    );
+    assert!(!processed.text.contains("too large"));
+    assert!(!processed.text.contains('\u{fffd}'));
+}
+
+#[test]
+fn process_file_arguments_sanitizes_media_source_names() {
+    let harness = TestHarness::new("process_file_arguments_sanitizes_media_source_names");
+    let path = harness.create_file("clip\u{202e}\u{2066}.MP4", [0, 0xff, 1]);
+    let processed = process_file_arguments(
+        &[path.to_string_lossy().into_owned()],
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("attach media with an untrusted display label");
+
+    let [ContentBlock::Media(media)] = processed.attachments.as_slice() else {
+        panic!("expected one media attachment");
+    };
+    assert_eq!(media.name.as_deref(), Some("clip.MP4"));
+    assert_eq!(media.mime_type, "video/mp4");
+}
+
+#[test]
+fn process_file_arguments_observes_added_roots_and_shared_revocation() {
+    let harness =
+        TestHarness::new("process_file_arguments_observes_added_roots_and_shared_revocation");
+    let primary = harness.create_dir("primary");
+    let additional = harness.create_dir("additional");
+    let notes = harness.create_file("additional/notes.txt", "allowed workspace notes\n");
+    let media = harness.create_file("additional/recording.wav", [0, 0xff, 1]);
+    let outside = harness.create_file("outside/secret.mp4", "PRIVATE-OUTSIDE-CANARY");
+    let args: Vec<String> = [&notes, &media]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let mut workspace = pi::workspace::WorkspaceHandle::single(&primary);
+    let reader = workspace.clone();
+
+    let denied = process_file_arguments(&args, &primary, false, &reader)
+        .expect_err("ungranted roots cannot be read");
+    assert!(denied.to_string().contains("outside the"));
+    workspace.add_root(&additional);
+    let processed = process_file_arguments(&args, &primary, false, &reader)
+        .expect("the actual file opener must honor the newly granted root");
+    assert!(processed.text.contains("allowed workspace notes"));
+    assert!(matches!(
+        processed.attachments.as_slice(),
+        [ContentBlock::Media(media)] if media.mime_type == "audio/wav"
+    ));
+
+    let denied = process_file_arguments(
+        &[outside.to_string_lossy().into_owned()],
+        &primary,
+        false,
+        &reader,
+    )
+    .expect_err("adding one root must not grant unrelated siblings");
+    assert!(denied.to_string().contains("outside the"));
+    assert!(!denied.to_string().contains("PRIVATE-OUTSIDE-CANARY"));
+    assert!(workspace.remove_root(&additional));
+    let revoked = process_file_arguments(&args, &primary, false, &reader)
+        .expect_err("removal must immediately revoke the reader clone's access");
+    assert!(revoked.to_string().contains("outside the"));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_file_arguments_rejects_symlink_and_parent_escapes_from_added_roots() {
+    let harness = TestHarness::new(
+        "process_file_arguments_rejects_symlink_and_parent_escapes_from_added_roots",
+    );
+    let primary = harness.create_dir("primary");
+    let additional = harness.create_dir("additional");
+    let outside = harness.create_file("outside/secret.mp4", "PRIVATE-OUTSIDE-CANARY");
+    let link = additional.join("link.mp4");
+    std::os::unix::fs::symlink(&outside, &link).expect("create escape fixture");
+    let mut workspace = pi::workspace::WorkspaceHandle::single(&primary);
+    workspace.add_root(&additional);
+
+    for path in [link, additional.join("../outside/secret.mp4")] {
+        let denied = process_file_arguments(
+            &[path.to_string_lossy().into_owned()],
+            &primary,
+            false,
+            &workspace,
+        )
+        .expect_err("file references must stay in the granted canonical roots");
+        assert!(denied.to_string().contains("outside the"));
+        assert!(!denied.to_string().contains("PRIVATE-OUTSIDE-CANARY"));
+    }
 }
 
 #[test]
@@ -855,7 +1327,13 @@ fn process_file_arguments_unicode_content_preserved() {
     let file_path = harness.create_file("unicode.txt", "hello 世界\nこんにちは\n");
     let args = vec![file_path.to_string_lossy().to_string()];
 
-    let processed = process_file_arguments(&args, harness.temp_dir(), false).expect("ok");
+    let processed = process_file_arguments(
+        &args,
+        harness.temp_dir(),
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("ok");
 
     assert!(processed.text.contains("hello 世界"));
     assert!(processed.text.contains("こんにちは"));
@@ -885,7 +1363,7 @@ fn cli_message_args_empty_when_only_files() {
 #[test]
 fn apply_piped_stdin_empty_content_no_op() {
     let mut cli = cli::Cli::parse_from(["pi", "hello"]);
-    apply_piped_stdin(&mut cli, Some(String::new()));
+    assert!(apply_piped_stdin(&mut cli, Some(String::new())).is_none());
     assert!(!cli.print);
     assert_eq!(cli.message_args(), vec!["hello"]);
 }
@@ -893,7 +1371,7 @@ fn apply_piped_stdin_empty_content_no_op() {
 #[test]
 fn apply_piped_stdin_whitespace_only_no_op() {
     let mut cli = cli::Cli::parse_from(["pi", "hello"]);
-    apply_piped_stdin(&mut cli, Some("\n\n\r\n".to_string()));
+    assert!(apply_piped_stdin(&mut cli, Some("\n\n\r\n".to_string())).is_none());
     assert!(!cli.print);
     assert_eq!(cli.message_args(), vec!["hello"]);
 }
@@ -901,9 +1379,10 @@ fn apply_piped_stdin_whitespace_only_no_op() {
 #[test]
 fn apply_piped_stdin_trims_trailing_newlines() {
     let mut cli = cli::Cli::parse_from(["pi"]);
-    apply_piped_stdin(&mut cli, Some("some input\n\n".to_string()));
+    let input = apply_piped_stdin(&mut cli, Some("some input\n\n".to_string()));
     assert!(cli.print);
-    assert_eq!(cli.message_args(), vec!["some input"]);
+    assert_eq!(input.as_deref(), Some("some input"));
+    assert!(cli.message_args().is_empty());
 }
 
 #[test]
@@ -940,9 +1419,15 @@ fn prepare_initial_message_multiple_files_with_message() {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
 
-    let initial = prepare_initial_message(harness.temp_dir(), &file_args, &mut messages, false)
-        .expect("prepare initial")
-        .expect("initial message present");
+    let initial = prepare_initial_message(
+        harness.temp_dir(),
+        &file_args,
+        &mut messages,
+        false,
+        &pi::workspace::WorkspaceHandle::default(),
+    )
+    .expect("prepare initial")
+    .expect("initial message present");
 
     // Both file contents present
     assert!(initial.text.contains("alpha"));
@@ -1086,9 +1571,11 @@ fn cli_ts_flag_parity_matrix_reports_full_coverage() {
 
 #[test]
 fn extension_registered_flags_can_be_passed_through_cli_parser() {
+    // `--plan` became a built-in flag in bbc68341 (model roles), so the
+    // extension-owned string flag needs a name the root parser does not claim.
     let manager = pi::extensions::ExtensionManager::new();
     manager.register_flag(serde_json::json!({
-        "name": "plan",
+        "name": "deploy-lane",
         "type": "string",
         "extension_id": "plan_mode",
     }));
@@ -1102,7 +1589,7 @@ fn extension_registered_flags_can_be_passed_through_cli_parser() {
         "pi".to_string(),
         "--model".to_string(),
         "gpt-4o".to_string(),
-        "--plan".to_string(),
+        "--deploy-lane".to_string(),
         "ship-it".to_string(),
         "--dry-run".to_string(),
         "--print".to_string(),
@@ -1132,7 +1619,7 @@ fn extension_registered_flags_can_be_passed_through_cli_parser() {
             ext_flag.display_name()
         );
     }
-    assert_eq!(parsed.extension_flags[0].name, "plan");
+    assert_eq!(parsed.extension_flags[0].name, "deploy-lane");
     assert_eq!(parsed.extension_flags[0].value.as_deref(), Some("ship-it"));
     assert_eq!(parsed.extension_flags[1].name, "dry-run");
     assert!(parsed.extension_flags[1].value.is_none());

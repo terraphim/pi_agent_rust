@@ -6,7 +6,8 @@
 //! - `non_extension`: Configuration, test, or other non-extension file
 //! - `unknown`: Cannot determine classification
 //!
-//! Output is saved to `docs/extension-entry-scan.json`.
+//! Output is verified against `docs/extension-entry-scan.json`; maintainers can
+//! regenerate that file explicitly with `PI_GENERATE_EXT_ENTRY_SCAN=1`.
 //!
 //! Bead: bd-2u2s
 
@@ -58,10 +59,19 @@ struct ScanOutput {
 }
 
 fn artifacts_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("ext_conformance")
-        .join("artifacts")
+    std::env::var("PI_TEST_ARTIFACTS_ROOT").map_or_else(
+        |_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("ext_conformance")
+                .join("artifacts")
+        },
+        PathBuf::from,
+    )
+}
+
+fn normalize_platform_line_endings(input: &str) -> String {
+    input.replace("\r\n", "\n")
 }
 
 fn collect_ts_files(root: &Path) -> Vec<PathBuf> {
@@ -418,12 +428,43 @@ fn scan_extension_entry_points() {
         files: classifications,
     };
 
-    // Write output to docs/
-    let output_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("docs")
-        .join("extension-entry-scan.json");
+    // Validate the committed output, or regenerate it only when explicitly requested.
+    let output_path = std::env::var("PI_TEST_ENTRY_SCAN_PATH").map_or_else(
+        |_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("extension-entry-scan.json")
+        },
+        PathBuf::from,
+    );
     let json = serde_json::to_string_pretty(&output).expect("serialize scan output");
-    std::fs::write(&output_path, &json).expect("write scan output");
+    let generate = matches!(
+        std::env::var("PI_GENERATE_EXT_ENTRY_SCAN").as_deref(),
+        Ok("1")
+    );
+    if generate {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        pi::conformance::snapshot::verify_tree_completeness(
+            repo_root,
+            "tests/ext_conformance/artifacts",
+        )
+        .expect("tree completeness verification failed: refusing to generate entry scan against truncated tree");
+        std::fs::write(&output_path, &json).expect("write scan output");
+    } else {
+        let committed = std::fs::read_to_string(&output_path)
+            .expect("read committed extension entry scan output");
+        // Git may materialize tracked text as CRLF on Windows. Treat only the
+        // platform line-ending encoding as equivalent; lone carriage returns,
+        // trailing whitespace, and every JSON byte remain comparison-significant.
+        let committed = normalize_platform_line_endings(&committed);
+        let generated = normalize_platform_line_endings(&json);
+        assert_eq!(
+            committed, generated,
+            "committed extension entry scan is stale; regenerate explicitly with \
+             PI_GENERATE_EXT_ENTRY_SCAN=1 cargo test --test ext_entry_scan \
+             scan_extension_entry_points -- --exact"
+        );
+    }
 
     // Print summary
     println!("\n=== Extension Entry Point Scan ===");
@@ -443,7 +484,11 @@ fn scan_extension_entry_points() {
             stats.total_files, stats.entry_points, stats.sub_modules
         );
     }
-    println!("\nOutput written to: {}", output_path.display());
+    if generate {
+        println!("\nOutput written to: {}", output_path.display());
+    } else {
+        println!("\nCommitted output verified: {}", output_path.display());
+    }
 
     // Assertions
     assert!(
@@ -492,6 +537,22 @@ fn scan_extension_entry_points() {
             );
         }
     }
+}
+
+#[test]
+fn entry_scan_comparison_normalizes_only_crlf() {
+    assert_eq!(
+        normalize_platform_line_endings("{\r\n  \"ok\": true\r\n}"),
+        normalize_platform_line_endings("{\n  \"ok\": true\n}")
+    );
+    assert_ne!(
+        normalize_platform_line_endings("{\"value\": \"a\rb\"}"),
+        normalize_platform_line_endings("{\"value\": \"ab\"}")
+    );
+    assert_ne!(
+        normalize_platform_line_endings("{\"ok\": true} "),
+        normalize_platform_line_endings("{\"ok\": true}")
+    );
 }
 
 /// Focused test: verify classification accuracy on known extensions.

@@ -66,6 +66,13 @@ Keys are specified as `modifier+key`.
 | `pageUp` | `pageup` | Scroll up by page |
 | `pageDown` | `pagedown` | Scroll down by page |
 
+`cursorUp` and `cursorDown` also browse sent prompts when the draft occupies
+one visible row. Recalled entries stay browsable until edited, even if they
+contain newlines or wrap across rows. Editing a recalled entry makes it the
+current draft: multiline drafts use these actions for cursor movement. If you
+start browsing again from a one-row draft, moving forward past the newest
+entry restores that edited draft.
+
 ### Deletion
 
 | Action ID | Default Keys | Description |
@@ -101,8 +108,8 @@ Keys are specified as `modifier+key`.
 |-----------|--------------|-------------|
 | `copy` | `ctrl+c` | Copy selection |
 | `pasteImage` | `ctrl+v` | Paste image from clipboard |
-| `yank` | `ctrl+y` | Paste most recently deleted text |
-| `yankPop` | `alt+y` | Cycle through deleted text |
+| `yank` | *(none)* | Paste most recently deleted text (reserved) |
+| `yankPop` | *(none)* | Cycle through deleted text (reserved) |
 | `undo` | `ctrl+-` | Undo last edit |
 
 ### Models & Thinking
@@ -136,6 +143,10 @@ Keys are specified as `modifier+key`.
 | `followUp` | `alt+enter` | Queue follow-up message |
 | `dequeue` | `alt+up` | Restore queued messages to editor |
 
+Finish or dismiss an active ask, extension question, or login prompt before
+restoring queued messages. Restoring places queued messages in send order
+ahead of the current draft, preserving the draft's blank lines and spaces.
+
 ### Selection (Lists/Pickers)
 
 | Action ID | Default Keys | Description |
@@ -151,12 +162,12 @@ Keys are specified as `modifier+key`.
 
 | Action ID | Default Keys | Description |
 |-----------|--------------|-------------|
+| `deleteSession` | `ctrl+d` | Delete session |
 | `toggleSessionPath` | `ctrl+p` | Toggle path display |
 | `toggleSessionSort` | `ctrl+s` | Toggle sort mode |
 | `toggleSessionNamedFilter` | `ctrl+n` | Toggle named-only filter |
-| `renameSession` | `ctrl+r` | Rename session |
-| `deleteSession` | `ctrl+d` | Delete session |
-| `deleteSessionNoninvasive` | `ctrl+backspace` | Delete session when query is empty |
+| `renameSession` | *(none)* | Rename session (reserved) |
+| `deleteSessionNoninvasive` | *(none)* | Delete session when query is empty (reserved) |
 
 ## Context-dependent conflicts
 
@@ -165,4 +176,4 @@ Some keys are intentionally bound to multiple actions and are resolved based on 
 - `ctrl+c` can mean **Copy** (selection), **Clear** (editor), or **abort** (when running).
 - `ctrl+d` is **DeleteCharForward** in the editor, **Exit** when the editor is empty, and
   **DeleteSession** inside the session picker.
-- `ctrl+p` cycles models in the editor but toggles session path display in the picker.
+

@@ -9,7 +9,7 @@
 
 use super::harness::TestHarness;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,12 +20,12 @@ fn resolve_pi_binary_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    if let Ok(test_exe) = std::env::current_exe() {
-        if let Some(target_dir) = test_exe.parent().and_then(|parent| parent.parent()) {
-            let candidate = target_dir.join("pi");
-            if candidate.exists() {
-                return candidate;
-            }
+    if let Ok(test_exe) = std::env::current_exe()
+        && let Some(target_dir) = test_exe.parent().and_then(|parent| parent.parent())
+    {
+        let candidate = target_dir.join("pi");
+        if candidate.exists() {
+            return candidate;
         }
     }
 
@@ -96,6 +96,11 @@ impl TmuxInstance {
 
     /// Start a new 80x24 tmux session running the given script.
     pub fn start_session(&self, workdir: &Path, script_path: &Path) {
+        // Hardening: concurrent rch/tmp sweeps can reap harness dirs
+        // between creation and launch. A vanished `-c` workdir makes
+        // new-session succeed while the pane dies instantly and silently
+        // (empty captures, has-session false) — recreate defensively.
+        let _ = std::fs::create_dir_all(workdir);
         let workdir_str = workdir.display().to_string();
         let script_str = script_path.display().to_string();
         self.run_checked(
@@ -168,6 +173,16 @@ impl TmuxInstance {
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
+    /// Return the title most recently set by the process in the target pane.
+    pub fn pane_title(&self) -> String {
+        let target = self.target_pane();
+        let output = self.run_checked(
+            &["display-message", "-p", "-t", &target, "#{pane_title}"],
+            "display-message pane_title",
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     fn try_capture_pane(&self) -> Option<String> {
         let target = self.target_pane();
         let output = self.tmux_output(&["capture-pane", "-t", &target, "-p", "-S", "-2000"]);
@@ -184,7 +199,11 @@ impl TmuxInstance {
         let mut last_pane = String::new();
         loop {
             let Some(pane) = self.try_capture_pane() else {
-                if !self.session_exists() || start.elapsed() > timeout {
+                // A loaded worker can fail one capture/has-session probe right
+                // after `new-session -d` before the server finishes settling.
+                // Conclude death only after a short grace period; otherwise
+                // keep polling until the timeout.
+                if !self.session_exists() && start.elapsed() > Duration::from_secs(2) {
                     return last_pane;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -208,7 +227,7 @@ impl TmuxInstance {
         let mut last_pane = String::new();
         loop {
             let Some(pane) = self.try_capture_pane() else {
-                if !self.session_exists() || start.elapsed() > timeout {
+                if !self.session_exists() && start.elapsed() > Duration::from_secs(2) {
                     return last_pane;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -302,6 +321,7 @@ pub struct TuiSession {
     pub tmux: TmuxInstance,
     binary_path: PathBuf,
     env: BTreeMap<String, String>,
+    removed_env: BTreeSet<String>,
     steps: Vec<TuiStep>,
     start: Instant,
 }
@@ -360,6 +380,7 @@ impl TuiSession {
             tmux,
             binary_path,
             env,
+            removed_env: BTreeSet::new(),
             steps: Vec::new(),
             start: Instant::now(),
         })
@@ -367,7 +388,14 @@ impl TuiSession {
 
     /// Set an environment variable for the session.
     pub fn set_env(&mut self, key: &str, value: &str) {
+        self.removed_env.remove(key);
         self.env.insert(key.to_string(), value.to_string());
+    }
+
+    /// Remove a harness override and any inherited value from the child.
+    pub fn remove_env(&mut self, key: &str) {
+        self.env.remove(key);
+        self.removed_env.insert(key.to_string());
     }
 
     /// Launch the interactive session with the given CLI arguments.
@@ -376,6 +404,9 @@ impl TuiSession {
         let mut script = String::new();
         script.push_str("#!/usr/bin/env sh\n");
         script.push_str("set -eu\n");
+        for key in &self.removed_env {
+            let _ = writeln!(script, "unset {}", sh_escape(key));
+        }
         for (key, value) in &self.env {
             let _ = writeln!(script, "export {key}={}", sh_escape(value));
         }

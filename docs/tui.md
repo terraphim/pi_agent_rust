@@ -3,6 +3,17 @@
 Pi's interactive mode provides a full-screen terminal UI for chatting, streaming
 responses, and managing sessions.
 
+## Stacks and launch flags
+
+| Invocation | Stack | Notes |
+|---|---|---|
+| `pi` | FrankenTUI (`ftui`, default since v0.4.0) | Alternate screen; markdown render cache; busy spinner chain; inline ask cards |
+| `pi --inline` | FrankenTUI, inline | UI drawn at the bottom of the terminal; shell scrollback preserved |
+| `pi --classic` | charmed_rust / bubbletea (`src/interactive.rs`) | Previous stack, kept until removal; aliases `--classic-tui`, `--charmed`, `--bubbletea` |
+
+Both stacks share the agent-event vocabulary (`PiMsg`), keybinding catalog,
+slash commands, autocomplete, overlays, and session persistence.
+
 ## Layout
 
 ### Header
@@ -71,8 +82,8 @@ command surface implemented in `src/interactive.rs`.
 | `/login [provider]` | Login/setup credentials (OAuth for built-ins; API key prompts for supported providers). Run without args to see status table. |
 | `/logout [provider]` | Remove stored OAuth credentials. |
 | `/clear` (`/cls`) | Clear conversation view/history. |
-| `/model [id|provider/id]` (`/m`) | Show or change the current model. |
-| `/thinking [level]` (`/think`, `/t`) | Set thinking level (`off|minimal|low|medium|high|xhigh`). |
+| `/model [id|provider/id]` (`/m`, `/models`) | Show or change the current model. |
+| `/thinking [level]` (`/think`, `/t`, `/effort`) | Set thinking level (`off|minimal|low|medium|high|xhigh|max`). |
 | `/scoped-models [patterns\|clear]` (`/scoped`) | Show or set model patterns used for Ctrl+P cycling. |
 | `/history` (`/hist`) | Show input history. |
 | `/export [path]` | Export conversation to HTML. |
@@ -90,7 +101,7 @@ command surface implemented in `src/interactive.rs`.
 | `/compact [notes]` | Compact older context with optional instructions. |
 | `/reload` | Reload skills/prompts from disk. |
 | `/template <name> [args]` | Expand a prompt template by name. |
-| `/share` | Upload session HTML to a secret GitHub gist and show URL. |
+| `/share` | Upload the current branch as bounded HTML to a secret, unlisted GitHub gist and show its URL. Secret gists are not private; anyone with the URL can view them. Pi redacts recognized secrets and the exact workspace cwd, but the transcript may still contain other sensitive local context. |
 | `/exit` (`/quit`, `/q`) | Exit Pi. |
 
 ### Model selection
@@ -111,7 +122,28 @@ Visualize the conversation branching structure.
 - `Ctrl+U`: Toggle user-only view (hides assistant/tool noise)
 
 ### Settings (`/settings`)
-Change configuration on the fly (Thinking levels, themes, message delivery mode).
+
+On the default FrankenTUI stack, `/settings` or **F2** opens an editor for
+automatic retry and provider fallback, automatic context compaction, steering
+and follow-up delivery, image resizing, thinking-block visibility, transcript
+spacing, the double-Escape action, and completion menu height. Type to filter
+the list, press Enter to choose a setting, and press Enter again to save the
+selected value. Escape returns from a value list to settings, then closes the
+editor. Your unfinished prompt stays in the editor.
+
+Changes apply to the current session and persist to the explicit
+`PI_CONFIG_PATH` file when configured. Otherwise, trusted workspaces save to
+the project's `.pi/settings.json`; untrusted workspaces save to the global
+`settings.json` shown in the picker title. This follows the same configuration
+layers used when starting or reloading a session. Without an explicit override,
+untrusted project settings remain ignored and untouched. A save failure leaves
+the live preferences unchanged and reports the error. Disabling automatic
+recovery preserves its retry budgets and fallback state for re-enabling;
+disabling compaction invalidates any pending background summary. Settings open
+when the agent is idle. Custom `openSettings` keybindings are supported.
+
+Use `/thinking` to change reasoning level and `/theme` to select a theme. The
+classic stack retains its own settings selector.
 
 ## Message Queue
 
@@ -125,3 +157,10 @@ When Pi is busy generating a response or running tools, you can still type.
   editor (useful if you queued something by mistake).
 
 The queue is visible above the editor when not empty.
+
+The default UI also accepts `/compact [focus]`, `/compact shake`, and `/shake`
+while working. They wait after earlier queued messages and hold later input
+until the current work is saved and compaction finishes. `Alt+Up` recalls a
+waiting command and its queued text; interrupting active compaction cancels its
+summary request and restores unclaimed text. See [session compaction](session.md#compaction-compact)
+for cancellation and persistence behavior.

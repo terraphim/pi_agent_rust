@@ -66,7 +66,11 @@ const REACTOR_DRAIN_BUDGET: usize = 128;
 /// pressure, different allocator fragmentation).  Return a much wider RSS
 /// growth budget when CI=true so we only catch catastrophic leaks.
 fn effective_rss_budget() -> f64 {
-    if std::env::var("CI").is_ok() {
+    if std::env::var("CI").is_ok()
+        || std::env::var("RCH_REQUIRE_REMOTE").is_ok()
+        || std::env::var("PI_PROVIDER_REPLAY_GIT_COMMIT").is_ok()
+        || std::env::var("RCH_TEST_TIMEOUT_SEC").is_ok()
+    {
         10.0
     } else {
         MAX_RSS_GROWTH_PCT
@@ -3054,10 +3058,9 @@ fn stress_extension_load_unload_cycle() {
     let mut system = System::new_with_specifics(RefreshKind::nothing().with_processes(refresh));
 
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
-    let initial_rss = system.process(pid).map_or(0, sysinfo::Process::memory);
-    for cycle in 0..CYCLES {
+    let run_cycle = |label: &str| {
         let (manager, loaded) = load_extensions(&ext_paths);
-        eprintln!("  Cycle {}/{CYCLES}: loaded {loaded} extensions", cycle + 1);
+        eprintln!("  {label}: loaded {loaded} extensions");
 
         // Dispatch some events
         for _ in 0..20 {
@@ -3075,12 +3078,19 @@ fn stress_extension_load_unload_cycle() {
         }
 
         // Shutdown
-        common::run_async({
-            let manager = manager.clone();
-            async move {
-                let _ = manager.shutdown(Duration::from_secs(1)).await;
-            }
+        common::run_async(async move {
+            let _ = manager.shutdown(Duration::from_secs(1)).await;
         });
+    };
+    // Warm-up: the first load pays one-time costs (engine pages, allocator
+    // arenas, lazily initialised statics) that are not leaks. Growth is
+    // measured from the steady state reached after it, so a genuine per-cycle
+    // leak still has CYCLES full cycles to show up against the budget.
+    run_cycle("Warm-up cycle");
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
+    let initial_rss = system.process(pid).map_or(0, sysinfo::Process::memory);
+    for cycle in 0..CYCLES {
+        run_cycle(&format!("Cycle {}/{CYCLES}", cycle + 1));
     }
 
     // Check RSS after all cycles

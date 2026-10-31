@@ -11,11 +11,20 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const HIGH_VALUE_ARTIFACT_INVENTORY: &str =
     "docs/evidence/high-value-suite-artifact-inventory.json";
 const UBS_EXTENSION_RUNTIME_NOISE_BASELINE: &str =
     "docs/evidence/ubs-extension-runtime-noise-baseline.json";
+const PROVIDER_SUPPORT_MODULES: &[&str] = &[
+    "extension_stream",
+    "model_fetch",
+    "azure_terminal_safety_tests",
+    "openai_terminal_safety_tests",
+    "openai_deepseek",
+    "openai_deepseek_tests",
+];
 const REQUIRED_ARTIFACT_INVENTORY_AREAS: &[&str] = &[
     "provider_streaming",
     "sessions",
@@ -75,12 +84,11 @@ fn load_matrix_test_stems(root: &Path) -> BTreeSet<String> {
             for category in &["unit_tests", "e2e_scripts"] {
                 if let Some(entries) = req.get(*category).and_then(|v| v.as_array()) {
                     for entry in entries {
-                        if let Some(p) = entry.get("path").and_then(|v| v.as_str()) {
-                            if let Some(stem) =
+                        if let Some(p) = entry.get("path").and_then(|v| v.as_str())
+                            && let Some(stem) =
                                 p.strip_prefix("tests/").and_then(|s| s.strip_suffix(".rs"))
-                            {
-                                stems.insert(stem.to_string());
-                            }
+                        {
+                            stems.insert(stem.to_string());
                         }
                     }
                 }
@@ -119,21 +127,116 @@ fn load_json_value(root: &Path, relative_path: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("invalid JSON in {}: {e}", path.display())) // ubs:ignore test harness assertion, not production runtime.
 }
 
-/// Discover all `tests/*.rs` file stems on disk.
+/// Ask Git which of `candidates` are ignored, by rule rather than by index.
+///
+/// `git check-ignore` consults `.gitignore` and friends; it does not read
+/// `.git/index`, which is what makes it usable in the environments described
+/// on [`on_disk_test_stems`]. Exit status 0 means "some paths were ignored",
+/// 1 means "none were", and anything else (no Git, not a checkout) means we
+/// could not answer — the caller falls back to the literal `.gitignore` scan.
+///
+/// `--no-index` trades one thing away deliberately: plain `check-ignore`
+/// exempts a path that is in the index, so a file force-added despite matching
+/// an ignore rule would count as present, while here it reads as ignored. That
+/// case is a Git anti-pattern, does not occur in this repo (`check-ignore`
+/// currently matches none of the test files), and buying it back means reading
+/// the index again — which is the whole problem.
+fn git_ignored_test_stems(root: &Path, candidates: &BTreeSet<String>) -> Option<BTreeSet<String>> {
+    if candidates.is_empty() {
+        return Some(BTreeSet::new());
+    }
+
+    let mut command = Command::new("git");
+    command
+        .current_dir(root)
+        .args(["check-ignore", "--no-index", "--"]);
+    for stem in candidates {
+        command.arg(format!("tests/{stem}.rs"));
+    }
+
+    let output = command.output().ok()?;
+    // 0: at least one path is ignored. 1: none are, and stdout is empty.
+    // 128 and friends: not a checkout, or Git is unusable here.
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(
+        stdout
+            .lines()
+            .filter_map(|line| {
+                let stem = line.trim().strip_prefix("tests/")?.strip_suffix(".rs")?;
+                (!stem.contains('/')).then(|| stem.to_string())
+            })
+            .collect(),
+    )
+}
+
+fn literal_gitignored_test_stems(root: &Path) -> BTreeSet<String> {
+    let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
+        return BTreeSet::new();
+    };
+
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.starts_with('#')
+                && !line.starts_with('!')
+                && !line.contains('*')
+                && !line.contains('?')
+                && !line.contains('[')
+                && line.starts_with("tests/")
+                && Path::new(line)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        })
+        .filter_map(|line| {
+            let stem = line.strip_prefix("tests/")?.strip_suffix(".rs")?;
+            (!stem.contains('/')).then(|| stem.to_string())
+        })
+        .collect()
+}
+
+/// The top-level `tests/*.rs` files that exist, minus the ones Git is
+/// configured to ignore.
+///
+/// This deliberately does **not** use `git ls-files`, which it used to. The
+/// index is not a reliable statement about what is on disk in the environments
+/// this suite runs in: `rch` ships a compiled-in transfer exclusion for
+/// `.git/index` (see `rch config show`, `exclude_patterns`), so a remote worker
+/// receives the working tree — new test files included, which Cargo then
+/// happily compiles and runs — on top of whatever index its checkout already
+/// had. Every newly added test file therefore looked *absent* to this gate on
+/// every worker, one release-blocking failure per file added, with the file
+/// sitting right there next to the binary that had just executed it.
+///
+/// The index was only ever a proxy for the real rule, which is what this
+/// implements directly: a file counts if Cargo would build it as a test target
+/// and Git is not ignoring it. Gitignored developer repro files stay excluded,
+/// which is the behaviour the index lookup was reaching for, and the answer is
+/// now the same on a laptop and on a worker.
 fn on_disk_test_stems(root: &Path) -> BTreeSet<String> {
     let tests_dir = root.join("tests");
-    let mut stems = BTreeSet::new();
+    let mut present = BTreeSet::new();
     if let Ok(entries) = std::fs::read_dir(&tests_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    stems.insert(stem.to_string());
-                }
+            // `mod.rs` is a shared module, never its own test target.
+            if path.extension().is_some_and(|e| e == "rs")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && stem != "mod"
+            {
+                present.insert(stem.to_string());
             }
         }
     }
-    stems
+
+    let ignored = git_ignored_test_stems(root, &present)
+        .unwrap_or_else(|| literal_gitignored_test_stems(root));
+    present.retain(|stem| !ignored.contains(stem));
+    present
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -143,7 +246,7 @@ struct SourceInventoryDiff {
 }
 
 impl SourceInventoryDiff {
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.missing_from_matrix.is_empty() && self.stale_matrix_entries.is_empty()
     }
 }
@@ -227,7 +330,7 @@ fn on_disk_native_provider_modules(root: &Path) -> BTreeSet<String> {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_else(|| panic!("provider file has invalid UTF-8 path: {}", path.display())); // ubs:ignore test harness assertion, not production runtime.
-        if stem != "mod" {
+        if stem != "mod" && !PROVIDER_SUPPORT_MODULES.contains(&stem) {
             modules.insert(stem.to_string());
         }
     }
@@ -238,18 +341,17 @@ fn load_provider_doc_native_modules(root: &Path) -> BTreeSet<String> {
     let path = root.join("docs/providers.md");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display())); // ubs:ignore test harness assertion, not production runtime.
-    let marker = "excluding `mod.rs`:";
-    let list_line = content
+    let marker = "Those modules are ";
+    let module_text = content
         .split(marker)
         .nth(1)
-        .and_then(|rest| rest.lines().next())
+        .and_then(|rest| rest.split(". User-visible").next())
         .unwrap_or_else(|| panic!("docs/providers.md missing provider-count rule marker")); // ubs:ignore test harness assertion, not production runtime.
 
-    list_line
+    module_text
         .split('`')
         .skip(1)
         .step_by(2)
-        .filter(|module| !module.contains('/') && *module != "mod.rs")
         .map(str::to_string)
         .collect()
 }
@@ -346,11 +448,11 @@ fn native_provider_module_inventory_matches_provider_docs() {
 
     assert_eq!(
         documented, on_disk,
-        "docs/providers.md provider-count rule must match src/providers/*.rs excluding mod.rs"
+        "docs/providers.md provider-count rule must match direct provider implementations"
     );
     assert_eq!(
         on_disk.len(),
-        10,
+        11,
         "native provider module count changed; update docs/providers.md and this expectation"
     );
 }
@@ -364,7 +466,7 @@ fn native_provider_module_inventory_matches_readme_claims() {
     assert_readme_native_provider_count_claims(&root, on_disk.len());
     assert_eq!(
         documented, on_disk,
-        "README.md provider-count rule must match src/providers/*.rs excluding mod.rs"
+        "README.md provider-count rule must match direct provider implementations"
     );
 }
 

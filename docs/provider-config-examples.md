@@ -473,9 +473,117 @@ Common auth issues and their fixes: [provider-auth-troubleshooting.md](provider-
 
 ---
 
+## Retry and Cross-Model Failover
+
+When a provider returns a transient failure — a 429, a quota rejection, a 529 or
+another overload — pi can retry the same model, and then continue the turn on a
+different one. Same-model retry is enabled by default; switching models requires
+a configured fallback chain.
+
+```jsonc
+{
+  "retry": {
+    // Every value below is shown at its default, so this block reproduces
+    // stock behaviour except for the chain, which has no default.
+    "enabled": true,           // false disables retry AND failover
+    "modelFallback": true,     // false keeps same-model retries without model swaps
+    "fallbackOn": "any",       // any | usage-limit | except-usage-limit
+    "maxRetries": 3,           // same-model attempts before the chain is consulted
+    "baseDelayMs": 2000,       // exponential backoff starts here
+    "maxDelayMs": 60000,
+
+    // Cross-model failover. Keys are a role name ("default", "smol", "slow",
+    // "plan", "commit") or an exact "provider/model" spec; values are ordered
+    // fallbacks. The ROLE key is checked first, so if both could match the
+    // active model, the role wins and the exact spec is never consulted.
+    "fallbackChains": {
+      "default": ["openai/gpt-5", "google/gemini-2.5-pro"],
+      "anthropic/claude-sonnet-4-5": ["anthropic/claude-haiku-4-5"]
+    },
+    "failoverCooldownSecs": 300,  // how long before the primary is tried again
+    "maxFailoversPerTurn": 8
+  }
+}
+```
+
+Set `modelFallback: false` when the selected model must remain fixed during
+automatic recovery. Use `fallbackOn: "usage-limit"` to change models only when
+account credits or subscription usage are exhausted, or `"except-usage-limit"`
+to reserve fallback for other transient provider failures. Explicit RPM/TPM
+and concurrency throttles remain transient rate limits. These choices retain
+the same-model retry policy and never admit authentication, context-overflow,
+cancellation, or durability failures. The default interactive `/settings`
+panel exposes both preferences.
+
+A retry RESUMES the turn rather than replaying it: only the failed request's
+incomplete output is stripped, so completed tool calls are neither re-run nor
+re-billed. A failover swaps the model, records the swap in the transcript, and
+restores your original model once `failoverCooldownSecs` has elapsed.
+
+Auth errors never fail over, and neither do aborts — falling back into an
+authentication failure is strictly worse than the quota error that started it.
+A session-persistence failure is terminal on every surface and is never retried.
+
+### Which surfaces honour this
+
+This has NOT historically been uniform, so check the row for the way you run pi:
+
+| How you run pi | Retry | Failover chain | Primary restored |
+|---|---|---|---|
+| Default interactive TUI | yes | yes | yes |
+| `-p` / `--print` | yes | yes | yes |
+| RPC server (`--mode rpc`) | yes | yes | yes |
+| ACP editors (`--acp`, including Zed) | yes | yes | yes |
+| Embedders using `pi::sdk` | opt-in | opt-in | opt-in |
+| Classic interactive stack (`--classic`) | yes | yes | yes |
+
+Both interactive stacks use the SDK recovery driver. The classic UI keeps the
+turn active during retry backoff, reports retries and model swaps in the
+conversation, and updates its model indicator after a fallback or primary
+restoration. Escape cancels the whole turn, including an in-progress backoff.
+Text, attachments, and extension-triggered continuations share these rules.
+
+ACP editors also use the shared recovery driver. Retry and fallback notices
+exclude provider error bodies, and complete `config_option_update` notifications
+keep the editor's model and thinking selectors aligned with committed changes.
+Cancelling a prompt stops pending retry backoff. Explicitly choosing a model in
+the editor ends automatic restoration, including when choosing the active
+fallback again. Saved fallback state survives reopening the session.
+
+Editor launch arguments `--provider`, `--model`, `--models`, `--thinking`, and
+`--api-key` reach each new ACP session. Model scopes use the workspace requested
+by the editor; explicit effort is clamped to the selected model's capabilities.
+An explicit key works without stored credentials and remains the runtime
+override through retries, fallback, and editor model changes. It is never written
+to the session. Reopening a saved branch restores that branch's model and effort,
+while using the launch credential override if supplied. A failed startup OAuth
+refresh blocks only sessions selecting that provider, unless an explicit key
+supplies the credential.
+
+ACP also applies the host's `--tools` and `--no-tools` controls. Disabling
+built-ins removes configured automatic tools as well; separately supplied MCP
+servers retain their existing trust and permission flow. Terminal-only tools
+(`ask`, `todo`, and `submit_plan`) remain unavailable in ACP.
+
+`--system-prompt`, `--append-system-prompt`, `--no-context-files`, and
+`--hide-cwd-in-prompt` apply when each editor session is constructed. An
+unreadable explicit prompt file rejects session creation. Skills are advertised
+only when the read tool is enabled. `--max-tool-iterations` uses the normal CLI
+clamping and environment fallback, and `--max-time` stops at the existing safe
+turn boundary while preserving session state. The editor receives the time-cap
+marker only after persistence succeeds.
+
+**Embedders opt in.** `pi::sdk::SessionOptions` defaults `retry` and `failover`
+to `None`, so a host that builds its own session enables them explicitly
+(`RetryPolicy::from_config` and `FailoverOptions::from_config` read the same
+config block shown above).
+
+---
+
 ## Related Docs
 
 - Auth troubleshooting: [provider-auth-troubleshooting.md](provider-auth-troubleshooting.md)
 - Longtail evidence: [provider-longtail-evidence.md](provider-longtail-evidence.md)
 - Onboarding playbook: [provider-onboarding-playbook.md](provider-onboarding-playbook.md)
 - Provider metadata source: `src/provider_metadata.rs`
+- Retry/failover policy source: `src/failover.rs`

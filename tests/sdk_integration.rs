@@ -1,3 +1,8 @@
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
+
 //! SDK integration test suite (bd-2hcex: PARITY-V3).
 //!
 //! Validates that the programmatic SDK API (`pi::sdk`) works correctly:
@@ -13,7 +18,7 @@ mod common;
 
 use async_trait::async_trait;
 use common::{TestHarness, run_async};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use pi::agent::{AgentConfig, AgentEvent, AgentSession};
 use pi::compaction::ResolvedCompactionSettings;
 use pi::error::{Error, Result};
@@ -24,10 +29,12 @@ use pi::model::{
 };
 use pi::provider::{Context, Provider, StreamOptions};
 use pi::sdk::{
-    AgentSessionHandle, AgentSessionState, SessionOptions, SubscriptionId, create_agent_session,
+    AgentSessionHandle, AgentSessionState, McpSessionOptions, SessionOptions, SubscriptionId,
+    create_agent_session,
 };
 use pi::session::Session;
 use pi::tools::ToolRegistry;
+use pi::turn_recovery::TurnRecoveryMode;
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,6 +82,7 @@ impl ScriptedProvider {
                 ..Usage::default()
             },
             stop_reason: stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -151,6 +159,59 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// Keep the SDK's selected identity while scripting only its network transport.
+/// Session-header synchronization must retain this provider on every prompt.
+struct IdentityPreservingScriptedProvider {
+    identity: Arc<dyn Provider>,
+    scripted: Arc<ScriptedProvider>,
+}
+
+#[async_trait]
+impl Provider for IdentityPreservingScriptedProvider {
+    fn name(&self) -> &str {
+        self.identity.name()
+    }
+
+    fn api(&self) -> &str {
+        self.identity.api()
+    }
+
+    fn model_id(&self) -> &str {
+        self.identity.model_id()
+    }
+
+    fn model_cost(&self) -> Option<pi::provider::ModelCost> {
+        self.identity.model_cost()
+    }
+
+    async fn stream(
+        &self,
+        context: &Context<'_>,
+        options: &StreamOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let events = self.scripted.stream(context, options).await?;
+        let api = self.api().to_string();
+        let provider = self.name().to_string();
+        let model = self.model_id().to_string();
+        Ok(Box::pin(events.map(move |event| {
+            event.map(|mut event| {
+                let message = match &mut event {
+                    StreamEvent::Start { partial } => Some(partial),
+                    StreamEvent::Done { message, .. } => Some(message),
+                    StreamEvent::Error { error, .. } => Some(error),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    message.api.clone_from(&api);
+                    message.provider.clone_from(&provider);
+                    message.model.clone_from(&model);
+                }
+                event
+            })
+        })))
+    }
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -190,8 +251,16 @@ fn run_scripted(
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -240,6 +309,157 @@ fn sdk_basic_session_creation() {
         ctx.push(("provider".to_string(), provider.name().to_string()));
         ctx.push(("model".to_string(), provider.model_id().to_string()));
     });
+}
+
+#[test]
+fn sdk_run_limit_reaches_the_live_agent_and_persists_its_terminal_turn() {
+    let harness =
+        TestHarness::new("sdk_run_limit_reaches_the_live_agent_and_persists_its_terminal_turn");
+    for (label, limit, capped) in [
+        ("zero", Some(std::time::Duration::ZERO), true),
+        ("unbounded", None, false),
+        ("remaining", Some(std::time::Duration::from_secs(60)), false),
+    ] {
+        let options = SessionOptions {
+            no_session: false,
+            session_dir: Some(harness.temp_dir().join(label)),
+            max_time: limit,
+            compaction_settings: Some(ResolvedCompactionSettings {
+                enabled: false,
+                ..ResolvedCompactionSettings::default()
+            }),
+            ..default_session_options(&harness)
+        };
+        run_async(async move {
+            // Exercise the SDK constructor and prompt driver. Only replace the
+            // network transport, retaining the constructed Agent and its config.
+            let mut handle = create_agent_session(options).await.expect("create session");
+            let provider = Arc::new(ScriptedProvider::new(Script::SingleText(
+                "Provider completed the run".to_string(),
+            )));
+            let expected_model = handle.model();
+            let scripted_transport = Arc::new(IdentityPreservingScriptedProvider {
+                identity: handle.session().agent.provider(),
+                scripted: Arc::clone(&provider),
+            });
+            handle.session_mut().agent.set_provider(scripted_transport);
+            let events: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+            let prompt_events = Arc::clone(&events);
+            handle
+                .prompt("Run with the configured time budget", move |event| {
+                    let type_name = match &event {
+                        AgentEvent::AgentEnd { .. } => "agent_end",
+                        AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
+                        _ => return,
+                    };
+                    prompt_events.lock().expect("lock").push(type_name);
+                })
+                .await
+                .expect("successful terminal turn");
+            let events = events.lock().expect("lock").clone();
+            assert_eq!(handle.model(), expected_model);
+            assert_eq!(
+                provider.call_count.load(Ordering::SeqCst),
+                usize::from(!capped)
+            );
+            assert_eq!(
+                events.iter().filter(|event| **event == "agent_end").count(),
+                1,
+                "exactly one terminal event for {label}"
+            );
+            // ubs:ignore rust.panic.assert-macros -- Regression assertion: a terminal time cap must not enter provider retry.
+            assert!(events.iter().all(|event| *event != "auto_retry_start"));
+            let path = handle
+                .with_session(|session| session.path.clone())
+                .await
+                .expect("session path")
+                .expect("saved session");
+            drop(handle);
+            let reopened = Session::open(&path.to_string_lossy())
+                .await
+                .expect("reopen saved turn");
+            let messages = reopened.to_messages_for_current_path();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| matches!(message, Message::User(_)))
+                    .count(),
+                1
+            );
+            let assistants: Vec<_> = messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::Assistant(message) => Some(message),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                assistants.len(),
+                1,
+                "one durable assistant result for {label}"
+            );
+            let text = assistants
+                .first()
+                .expect("one durable assistant result")
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(text.contains("[time cap reached]"), capped);
+            if !capped {
+                assert_eq!(text, "Provider completed the run");
+            }
+        });
+    }
+}
+
+#[test]
+fn sdk_model_scope_selects_the_requested_destination_and_effort() {
+    let harness = TestHarness::new("sdk_model_scope_selects_the_requested_destination_and_effort");
+    for (spec, thinking, expected_provider, expected_model, expected_thinking) in [
+        (
+            "openai/gpt-4o:high",
+            None,
+            "openai",
+            "gpt-4o",
+            pi::model::ThinkingLevel::Off,
+        ),
+        (
+            "anthropic/claude-opus-4-5:low",
+            None,
+            "anthropic",
+            "claude-opus-4-5",
+            pi::model::ThinkingLevel::Low,
+        ),
+        (
+            "anthropic/claude-opus-4-5:low",
+            Some(pi::model::ThinkingLevel::High),
+            "anthropic",
+            "claude-opus-4-5",
+            pi::model::ThinkingLevel::High,
+        ),
+    ] {
+        let options = SessionOptions {
+            provider: None,
+            model: None,
+            model_scope: Some(vec![spec.to_string()]),
+            thinking,
+            ..default_session_options(&harness)
+        };
+        let handle = run_async(create_agent_session(options)).expect("create scoped session");
+        assert_eq!(
+            handle.model(),
+            (expected_provider.to_string(), expected_model.to_string()),
+        );
+        assert_eq!(handle.thinking_level(), Some(expected_thinking));
+        assert_eq!(
+            handle.session().agent.stream_options().api_key.as_deref(),
+            Some(TEST_API_KEY),
+        );
+    }
 }
 
 // ============================================================================
@@ -422,6 +642,101 @@ fn sdk_session_persistence() {
         });
 }
 
+#[test]
+fn sdk_resumed_session_persists_turn_through_canonical_path() {
+    let harness = TestHarness::new("sdk_resumed_session_persists_turn_through_canonical_path");
+    let session_dir = harness.temp_dir().join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    let path = session_dir.join("resumed.jsonl");
+    let options = SessionOptions {
+        no_session: false,
+        session_path: Some(path.clone()),
+        session_dir: Some(session_dir.clone()),
+        no_context_files: true,
+        enabled_tools: Some(Vec::new()),
+        compaction_settings: Some(ResolvedCompactionSettings {
+            enabled: false,
+            ..ResolvedCompactionSettings::default()
+        }),
+        ..default_session_options(&harness)
+    };
+    let cwd = harness.temp_dir().to_path_buf();
+
+    run_async(async move {
+        let mut source = Session::create_with_dir(Some(session_dir));
+        source.header.cwd = cwd.display().to_string();
+        source.path = Some(path.clone());
+        source.append_model_message(Message::User(UserMessage {
+            content: UserContent::Text("before resume".to_string()),
+            timestamp: 1,
+        }));
+        source.save().await.expect("seed session");
+        let session_id = source.header.id.clone();
+        drop(source);
+
+        let canonical = std::fs::canonicalize(&path).expect("canonical session path");
+        // Let the SDK discover and canonicalize the saved session itself. On
+        // Windows this is the verbatim path that previously broke lock checks.
+        let mut handle = create_agent_session(options).await.expect("resume session");
+        let (resumed_id, resumed_path) = handle
+            .with_session(|session| (session.header.id.clone(), session.path.clone()))
+            .await
+            .expect("resumed session identity");
+        assert_eq!(resumed_id, session_id);
+        assert_eq!(resumed_path.as_deref(), Some(canonical.as_path()));
+        #[cfg(windows)]
+        assert!(matches!(
+            canonical.components().next(),
+            Some(std::path::Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+        ));
+
+        let provider = Arc::new(ScriptedProvider::new(Script::SingleText(
+            "saved after resume".to_string(),
+        )));
+        let scripted_transport = Arc::new(IdentityPreservingScriptedProvider {
+            identity: handle.session().agent.provider(),
+            scripted: Arc::clone(&provider),
+        });
+        handle.session_mut().agent.set_provider(scripted_transport);
+        handle
+            .prompt("after resume", |_| {})
+            .await
+            .expect("resumed SDK prompt must persist its turn");
+        assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+        let saved_messages = handle.messages().await.expect("saved SDK messages");
+        drop(handle);
+
+        let reopened = Session::open(&canonical.to_string_lossy())
+            .await
+            .expect("reopen resumed SDK session");
+        assert_eq!(reopened.header.id, session_id);
+        assert_eq!(reopened.path.as_deref(), Some(canonical.as_path()));
+        let messages = reopened.to_messages_for_current_path();
+        assert_eq!(messages.len(), 3, "seed, resumed prompt, and reply survive");
+        assert_eq!(
+            serde_json::to_value(&messages).expect("serialize reopened messages"),
+            serde_json::to_value(&saved_messages).expect("serialize saved messages"),
+        );
+        let user_texts: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(UserMessage {
+                    content: UserContent::Text(text),
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, ["before resume", "after resume"]);
+        assert!(matches!(
+            messages.last(),
+            Some(Message::Assistant(message))
+                if matches!(message.content.as_slice(), [ContentBlock::Text(text)]
+                    if text.text == "saved after resume")
+        ));
+    });
+}
+
 // ============================================================================
 // 6. Abort — verify prompt can be cancelled
 // ============================================================================
@@ -456,7 +771,7 @@ fn sdk_compact_empty_session() {
     let events_ref = Arc::clone(&events);
     run_async(async move {
         handle
-            .compact(move |event| {
+            .compact(None, move |event| {
                 events_ref.lock().expect("lock").push(event);
             })
             .await
@@ -465,17 +780,22 @@ fn sdk_compact_empty_session() {
 
     let captured_len = {
         let captured = events.lock().expect("lock");
-        assert!(
-            captured.is_empty(),
-            "compact on empty session should emit no events, got {}",
-            captured.len()
-        );
+        assert_eq!(captured.len(), 2, "a skipped request must end its progress");
+        assert!(matches!(
+            captured[0],
+            AgentEvent::ManualCompactionStart { mode: None }
+        ));
+        assert!(matches!(
+            captured[1],
+            AgentEvent::ManualCompactionEnd {
+                result: None,
+                aborted: false,
+                skipped: Some(true),
+                ..
+            }
+        ));
         captured.len()
     };
-    assert!(
-        captured_len == 0,
-        "compact on empty session should emit no events, got {captured_len}"
-    );
 
     harness.log().info_ctx("sdk", "compact noop ok", |ctx| {
         ctx.push(("event_count".to_string(), captured_len.to_string()));
@@ -670,7 +990,9 @@ fn sdk_extensions_load_and_expose_registration_surface() {
         r#"export default function init(pi) {
   pi.registerCommand("sdk-visible", {
     description: "visible command",
-    handler: async (args) => ({ display: "sdk-visible:" + (args || "") })
+    handler: async (args) => ({
+      display: "sdk-visible:" + (args || "") + ":" + pi.getFlag("sdk-flag")
+    })
   });
   pi.registerFlag("sdk-flag", {
     type: "string",
@@ -684,6 +1006,10 @@ fn sdk_extensions_load_and_expose_registration_surface() {
         api_key: Some(TEST_API_KEY.to_string()),
         extension_paths: vec![extension_path],
         extension_policy: Some("safe".to_string()),
+        extension_flags: vec![pi::cli::ExtensionCliFlag {
+            name: "sdk-flag".to_string(),
+            value: Some("from-cli".to_string()),
+        }],
         no_session: true,
         ..SessionOptions::default()
     };
@@ -722,7 +1048,7 @@ fn sdk_extensions_load_and_expose_registration_surface() {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     assert!(
-        display.contains("sdk-visible:ok"),
+        display.contains("sdk-visible:ok:from-cli"),
         "unexpected extension command display payload: {command_result:?}"
     );
 }
@@ -817,6 +1143,133 @@ fn sdk_extension_policy_safe_denies_exec_and_records_hostcall_telemetry() {
 }
 
 // ============================================================================
+// SDK workspace trust gates project MCP discovery
+// ============================================================================
+
+#[test]
+fn sdk_mcp_discovery_honors_workspace_trust() {
+    let harness = TestHarness::new("sdk_mcp_discovery_honors_workspace_trust");
+    let project_mcp = harness.temp_path(".pi/mcp.json");
+    let global_dir = harness.temp_path("mcp-global");
+    std::fs::create_dir_all(project_mcp.parent().expect("project MCP parent"))
+        .expect("create project MCP dir");
+    std::fs::create_dir_all(&global_dir).expect("create global MCP dir");
+    std::fs::write(
+        &project_mcp,
+        r#"{"mcpServers":{"project-server":{"command":"project-bin"}}}"#,
+    )
+    .expect("write project MCP config");
+    std::fs::write(
+        global_dir.join("mcp.json"),
+        r#"{"mcpServers":{"global-server":{"command":"global-bin"}}}"#,
+    )
+    .expect("write global MCP config");
+
+    let mut options = default_session_options(&harness);
+    options.workspace_trusted = false;
+    options.mcp = Some(McpSessionOptions {
+        config_paths: Vec::new(),
+        global_dir: Some(global_dir),
+    });
+
+    let untrusted = run_async(create_agent_session(options.clone())).expect("create session");
+    let untrusted_manager = untrusted.mcp_manager().expect("MCP manager");
+    let untrusted_names = untrusted_manager
+        .list()
+        .into_iter()
+        .map(|server| server.name)
+        .collect::<Vec<_>>();
+    assert_eq!(untrusted_names, vec!["global-server"]);
+
+    options.workspace_trusted = true;
+    let trusted = run_async(create_agent_session(options)).expect("create trusted session");
+    let mut trusted_names = trusted
+        .mcp_manager()
+        .expect("MCP manager")
+        .list()
+        .into_iter()
+        .map(|server| server.name)
+        .collect::<Vec<_>>();
+    trusted_names.sort_unstable();
+    assert_eq!(trusted_names, vec!["global-server", "project-server"]);
+}
+
+#[test]
+fn sdk_mcp_project_opt_out_skips_malformed_sources_and_keeps_explicit_files() {
+    let harness = TestHarness::new("sdk_mcp_project_opt_out");
+    let global = harness.temp_path("mcp-global");
+    std::fs::create_dir_all(&global).expect("global MCP directory");
+    for relative in [".pi/mcp.json", ".agents/mcp.json", ".claude/mcp.json"] {
+        harness.create_file(relative, b"{ malformed project definition");
+    }
+    harness.create_file(
+        ".pi/settings.json",
+        br#"{"mcp":{"enableProjectConfig":false}}"#,
+    );
+    std::fs::write(
+        global.join("mcp.json"),
+        r#"{"mcpServers":{"global":{"url":"https://global.example.test/mcp"}}}"#,
+    )
+    .expect("global MCP definition");
+    let explicit = harness.create_file(
+        "explicit-mcp.json",
+        br#"{"mcpServers":{"explicit":{"url":"https://explicit.example.test/mcp"}}}"#,
+    );
+    let mut options = default_session_options(&harness);
+    options.workspace_trusted = true;
+    options.mcp = Some(McpSessionOptions {
+        config_paths: vec![explicit],
+        global_dir: Some(global),
+    });
+    let disabled =
+        run_async(create_agent_session(options.clone())).expect("disabled project session");
+    let manager = disabled.mcp_manager().expect("MCP manager");
+    let mut names = manager
+        .list()
+        .into_iter()
+        .map(|row| row.name)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["explicit", "global"]);
+    assert!(
+        manager.warnings().is_empty(),
+        "disabled files must not be read"
+    );
+
+    harness.create_file(
+        ".pi/settings.json",
+        br#"{"mcp":{"enableProjectConfig":true}}"#,
+    );
+    let enabled =
+        run_async(create_agent_session(options.clone())).expect("enabled project session");
+    let manager = enabled.mcp_manager().expect("MCP manager");
+    assert_eq!(
+        manager
+            .list()
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["explicit"]
+    );
+    assert!(
+        !manager.warnings().is_empty(),
+        "malformed project source blocks lower layers"
+    );
+
+    options.workspace_trusted = false;
+    let untrusted = run_async(create_agent_session(options)).expect("untrusted session");
+    let manager = untrusted.mcp_manager().expect("MCP manager");
+    let mut names = manager
+        .list()
+        .into_iter()
+        .map(|row| row.name)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["explicit", "global"]);
+    assert!(manager.warnings().is_empty());
+}
+
+// ============================================================================
 // 13. Conformance: Event ordering guarantees
 // ============================================================================
 
@@ -850,9 +1303,17 @@ fn sdk_conformance_event_ordering() {
             AgentEvent::ToolExecutionEnd { .. } => "ToolExecutionEnd",
             AgentEvent::AutoCompactionStart { .. } => "AutoCompactionStart",
             AgentEvent::AutoCompactionEnd { .. } => "AutoCompactionEnd",
+            AgentEvent::ManualCompactionStart { .. } => "ManualCompactionStart",
+            AgentEvent::ManualCompactionEnd { .. } => "ManualCompactionEnd",
             AgentEvent::AutoRetryStart { .. } => "AutoRetryStart",
             AgentEvent::AutoRetryEnd { .. } => "AutoRetryEnd",
+            AgentEvent::FailoverStart { .. } => "FailoverStart",
+            AgentEvent::FailoverEnd { .. } => "FailoverEnd",
+            AgentEvent::PrewalkSwitched { .. } => "PrewalkSwitched",
             AgentEvent::ExtensionError { .. } => "ExtensionError",
+            AgentEvent::AdvisorNote { .. } => "AdvisorNote",
+            AgentEvent::CostWarning { .. } => "CostWarning",
+            AgentEvent::ProviderError { .. } => "ProviderError",
         })
         .collect();
 
@@ -1059,8 +1520,16 @@ fn sdk_conformance_session_tool_hooks() {
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1143,8 +1612,16 @@ fn sdk_conformance_combined_callback_ordering() {
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1254,8 +1731,16 @@ fn sdk_continue_turn_uses_combined_listener_path() {
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1323,10 +1808,10 @@ fn sdk_continue_turn_uses_combined_listener_path() {
 }
 
 #[test]
-fn sdk_continue_turn_with_abort_returns_aborted_message() {
+fn sdk_continue_turn_with_abort_refuses_a_pre_aborted_signal() {
     use pi::sdk::EventListeners;
 
-    let harness = TestHarness::new("sdk_continue_turn_with_abort_returns_aborted_message");
+    let harness = TestHarness::new("sdk_continue_turn_with_abort_refuses_a_pre_aborted_signal");
     let cwd = harness.temp_dir().to_path_buf();
 
     run_async(async move {
@@ -1342,8 +1827,16 @@ fn sdk_continue_turn_with_abort_returns_aborted_message() {
                 ..StreamOptions::default()
             },
             block_images: false,
+            model_accepts_images: true,
             fail_closed_hooks: false,
             tool_approval: None,
+            keyword_settings: None,
+            max_time: None,
+            cost_budget: None,
+            turn_recovery: TurnRecoveryMode::default(),
+            approval_state: None,
+            bash_settings: None,
+            secrets: None,
         };
         let agent = pi::agent::Agent::new(provider, tools, config);
         let session = Arc::new(asupersync::sync::Mutex::new(Session::create_with_dir(
@@ -1361,12 +1854,13 @@ fn sdk_continue_turn_with_abort_returns_aborted_message() {
         let (abort_handle, abort_signal) = AgentSessionHandle::new_abort_handle();
         abort_handle.abort();
 
-        let message = handle
+        // A pre-aborted turn is refused before any provider or session work
+        // (src/sdk/recovery.rs `ensure_not_aborted`), as the recovery tests
+        // pin for every entry point.
+        let result = handle
             .continue_turn_with_abort(abort_signal, |_event| {})
-            .await
-            .expect("continue turn with pre-aborted signal");
+            .await;
 
-        assert_eq!(message.stop_reason, StopReason::Aborted);
-        assert_eq!(message.error_message.as_deref(), Some("Aborted"));
+        assert!(matches!(result, Err(Error::Aborted)), "{result:?}");
     });
 }

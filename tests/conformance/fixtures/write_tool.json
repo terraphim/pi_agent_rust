@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "tool": "write",
-  "description": "Conformance tests for the write tool (pi-mono parity)",
+  "description": "Conformance tests for ordinary writes and guarded conflict input validation",
   "cases": [
     {
       "name": "write_new_file",
@@ -12,7 +12,7 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 20 bytes to newfile.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
@@ -24,22 +24,20 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 7 bytes to nested/dir/file.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
       "name": "write_overwrites_existing",
       "description": "Write should overwrite existing files",
-      "setup": [
-        {"type": "create_file", "path": "existing.txt", "content": "old content"}
-      ],
+      "setup": [{ "type": "create_file", "path": "existing.txt", "content": "old content" }],
       "input": {
         "path": "existing.txt",
         "content": "new content"
       },
       "expected": {
         "content_exact": "Successfully wrote 11 bytes to existing.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
@@ -51,7 +49,7 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 0 bytes to empty.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
@@ -63,7 +61,7 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 23 bytes to unicode.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
@@ -75,7 +73,7 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 12 bytes to trailing.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
       }
     },
     {
@@ -87,7 +85,17 @@
       },
       "expected": {
         "content_exact": "Successfully wrote 25 bytes to special.txt",
-        "details_none": true
+        "details_exact": {"changed": true}
+      }
+    },
+    {
+      "name": "write_identical_content",
+      "description": "An acknowledged overwrite of identical bytes is not a project mutation",
+      "setup": [{"type": "create_file", "path": "same.txt", "content": "unchanged"}],
+      "input": {"path": "same.txt", "content": "unchanged"},
+      "expected": {
+        "content_exact": "Successfully wrote 9 bytes to same.txt",
+        "details_exact": {"changed": false}
       }
     },
     {
@@ -99,6 +107,30 @@
       },
       "expect_error": true,
       "error_contains": "Cannot write outside the working directory",
+      "expected": {}
+    },
+    {
+      "name": "conflict_write_requires_snapshot_token",
+      "description": "Tokenless conflict writes fail before Git inspection",
+      "input": {"path": "conflict://0", "content": "replacement"},
+      "expect_error": true,
+      "error_contains": "PI_CONFLICT_REFERENCE",
+      "expected": {}
+    },
+    {
+      "name": "conflict_batch_requires_choices",
+      "description": "An empty conflict batch is rejected before Git inspection",
+      "input": {"path": "conflict://*", "conflicts": []},
+      "expect_error": true,
+      "error_contains": "PI_CONFLICT_CHOICES",
+      "expected": {}
+    },
+    {
+      "name": "ordinary_write_rejects_conflict_choices",
+      "description": "Conflict fields must not be ignored on an ordinary write",
+      "input": {"path": "ordinary.txt", "content": "replacement", "conflicts": []},
+      "expect_error": true,
+      "error_contains": "conflicts requires path conflict://*",
       "expected": {}
     }
   ]

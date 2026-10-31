@@ -22,6 +22,21 @@ use pi::tools::{ToolOutput, ToolRegistry};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+const GENERATE_LIFECYCLE_HOOK_PARITY_ARTIFACT_ENV: &str =
+    "PI_GENERATE_LIFECYCLE_HOOK_PARITY_ARTIFACT";
+
+fn lifecycle_hook_parity_artifact_generation_enabled(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
+fn lifecycle_hook_parity_artifact_generation_requested() -> bool {
+    lifecycle_hook_parity_artifact_generation_enabled(
+        std::env::var(GENERATE_LIFECYCLE_HOOK_PARITY_ARTIFACT_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -232,15 +247,11 @@ fn collect_cancellable_lifecycle_results(cancel_manager: &ExtensionManager) -> V
     cancellable_results
 }
 
-fn write_lifecycle_hook_parity_artifact(ordering_trace: &[String], cancellable_results: &[Value]) {
-    let artifact_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("ext_conformance")
-        .join("reports")
-        .join("lifecycle_hooks");
-    std::fs::create_dir_all(&artifact_dir).expect("create lifecycle hook report dir");
-    let artifact_path = artifact_dir.join("lifecycle_hook_parity_matrix.json");
-    let artifact = json!({
+fn build_lifecycle_hook_parity_artifact(
+    ordering_trace: &[String],
+    cancellable_results: &[Value],
+) -> Value {
+    json!({
         "schema": "pi.ext.lifecycle_hook_parity_matrix.v1",
         "generated_at": chrono::Utc::now()
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -261,13 +272,74 @@ fn write_lifecycle_hook_parity_artifact(ordering_trace: &[String], cancellable_r
         ],
         "ordering_trace": ordering_trace,
         "cancellable_assertions": cancellable_results,
-        "reproduce_command": "cargo test --test extensions_event_wiring -- lifecycle_hook_parity_matrix_writes_evidence_artifact --nocapture --exact",
-    });
-    std::fs::write(
-        &artifact_path,
-        serde_json::to_string_pretty(&artifact).expect("serialize lifecycle hook artifact"),
-    )
-    .expect("write lifecycle hook artifact");
+        "reproduce_command": "PI_GENERATE_LIFECYCLE_HOOK_PARITY_ARTIFACT=1 cargo test --test extensions_event_wiring lifecycle_hook_parity_matrix_writes_evidence_artifact -- --exact --nocapture",
+    })
+}
+
+fn validate_and_maybe_write_lifecycle_hook_parity_artifact(
+    ordering_trace: &[String],
+    cancellable_results: &[Value],
+) {
+    let artifact = build_lifecycle_hook_parity_artifact(ordering_trace, cancellable_results);
+    let payload =
+        serde_json::to_string_pretty(&artifact).expect("serialize lifecycle hook parity artifact");
+    assert!(
+        !payload.trim().is_empty(),
+        "lifecycle hook parity payload must be non-empty"
+    );
+
+    let roundtripped: Value =
+        serde_json::from_str(&payload).expect("parse serialized lifecycle hook parity artifact");
+    assert_eq!(roundtripped, artifact, "lifecycle hook artifact roundtrip");
+    assert_eq!(
+        roundtripped.get("schema").and_then(Value::as_str),
+        Some("pi.ext.lifecycle_hook_parity_matrix.v1")
+    );
+    assert_eq!(
+        roundtripped.get("status").and_then(Value::as_str),
+        Some("pass")
+    );
+    assert_eq!(
+        roundtripped
+            .get("coverage")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(12)
+    );
+    assert_eq!(
+        roundtripped.get("ordering_trace"),
+        Some(&json!(ordering_trace))
+    );
+    assert_eq!(
+        roundtripped.get("cancellable_assertions"),
+        Some(&json!(cancellable_results))
+    );
+
+    if lifecycle_hook_parity_artifact_generation_requested() {
+        let artifact_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("ext_conformance")
+            .join("reports")
+            .join("lifecycle_hooks");
+        std::fs::create_dir_all(&artifact_dir)
+            .expect("create lifecycle hook parity artifact directory");
+        let artifact_path = artifact_dir.join("lifecycle_hook_parity_matrix.json");
+        std::fs::write(&artifact_path, payload.as_bytes())
+            .expect("write lifecycle hook parity artifact");
+        let metadata = std::fs::metadata(&artifact_path)
+            .expect("stat generated lifecycle hook parity artifact");
+        assert!(metadata.is_file(), "lifecycle hook artifact is not a file");
+        assert_eq!(
+            metadata.len(),
+            u64::try_from(payload.len()).expect("lifecycle hook payload length fits u64"),
+            "generated lifecycle hook artifact length mismatch"
+        );
+    } else {
+        eprintln!(
+            "Lifecycle hook artifact validated in memory; set \
+             {GENERATE_LIFECYCLE_HOOK_PARITY_ARTIFACT_ENV}=1 to write tracked evidence"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +631,60 @@ fn dispatch_event_with_response_none_when_no_hooks() {
     });
 
     assert!(response.is_none(), "Expected None when no hooks registered");
+}
+
+/// Extension whose `user_bash` answer depends on the command.
+const USER_BASH_EXT: &str = r#"
+export default function init(pi) {
+    pi.on("user_bash", (event) => {
+        if (event.command === "observe") return { allow: true };
+        if (event.command === "ops") return { operations: { exec: async () => ({ exitCode: 0 }) } };
+        if (event.command === "local") return undefined;
+        return {
+            result: {
+                output: `${event.cwd}|${event.excludeFromContext}|${event.command}`,
+                exitCode: 3,
+                truncated: true,
+            },
+        };
+    });
+}
+"#;
+
+/// Only `{ result }` replaces the shell run. An observing answer
+/// (`{ allow: true }`) or pi-mono's `{ operations }` used to be read as an
+/// empty successful result, so the command silently never ran.
+#[test]
+fn dispatch_user_bash_takes_only_a_result_answer() {
+    let harness = common::TestHarness::new("dispatch_user_bash_takes_only_a_result_answer");
+    let manager = load_js_extension(&harness, USER_BASH_EXT);
+    let cwd = harness.temp_dir().to_path_buf();
+
+    let (passed_through, hooked) = common::run_async({
+        let manager = manager.clone();
+        let cwd = cwd.clone();
+        async move {
+            let mut passed_through = Vec::new();
+            for command in ["observe", "ops", "local"] {
+                if manager
+                    .dispatch_user_bash(command, false, &cwd)
+                    .await
+                    .is_none()
+                {
+                    passed_through.push(command);
+                }
+            }
+            let hooked = manager.dispatch_user_bash("make", true, &cwd).await;
+            (passed_through, hooked)
+        }
+    });
+
+    assert_eq!(passed_through, ["observe", "ops", "local"]);
+    let hooked = hooked.expect("a result answer replaces the run");
+    assert_eq!(hooked.output, format!("{}|true|make", cwd.display()));
+    assert_eq!(hooked.exit_code, 3);
+    assert!(hooked.truncated); // ubs:ignore[rust.panic.assert-macros] -- test assertion
+    assert!(!hooked.cancelled); // ubs:ignore[rust.panic.assert-macros] -- test assertion
 }
 
 fn assert_signal_probe(response: &Value) {
@@ -991,7 +1117,26 @@ fn lifecycle_hook_parity_matrix_writes_evidence_artifact() {
         common::TestHarness::new("lifecycle_hook_parity_matrix_cancellable_session_hooks");
     let cancel_manager = load_js_extension(&cancel_harness, SESSION_CANCEL_EXT);
     let cancellable_results = collect_cancellable_lifecycle_results(&cancel_manager);
-    write_lifecycle_hook_parity_artifact(&ordering_trace, &cancellable_results);
+    validate_and_maybe_write_lifecycle_hook_parity_artifact(&ordering_trace, &cancellable_results);
+}
+
+#[test]
+fn lifecycle_hook_parity_artifact_generation_requires_exact_one() {
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(None));
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(Some("")));
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(Some(
+        "0"
+    )));
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(Some(
+        "true"
+    )));
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(Some(
+        " 1"
+    )));
+    assert!(!lifecycle_hook_parity_artifact_generation_enabled(Some(
+        "1 "
+    )));
+    assert!(lifecycle_hook_parity_artifact_generation_enabled(Some("1")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,4 +1256,176 @@ fn dispatch_tool_call_without_runtime_returns_none() {
             );
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// before_provider_request chaining (gh #219)
+// ---------------------------------------------------------------------------
+
+/// Load several JS extensions (in the given order) into one manager.
+fn load_js_extensions(harness: &common::TestHarness, sources: &[(&str, &str)]) -> ExtensionManager {
+    let cwd = harness.temp_dir().to_path_buf();
+    let specs = sources
+        .iter()
+        .map(|(name, source)| {
+            let path = harness.create_file(format!("extensions/{name}.mjs"), source.as_bytes());
+            JsExtensionLoadSpec::from_entry_path(&path).expect("load spec")
+        })
+        .collect::<Vec<_>>();
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        ..Default::default()
+    };
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(js_config, tools, manager)
+                .await
+                .expect("start js runtime")
+        }
+    });
+    manager.set_js_runtime(runtime);
+    common::run_async({
+        let manager = manager.clone();
+        async move {
+            manager
+                .load_js_extensions(specs)
+                .await
+                .expect("load extensions");
+        }
+    });
+    manager
+}
+
+/// Raises `max_tokens` and returns the payload object directly.
+const RAISE_MAX_TOKENS_EXT: &str = r#"
+export default function init(pi) {
+    pi.on("before_provider_request", (event, ctx) => {
+        return { ...event.payload, max_tokens: 65536, seen_by: ["raise"] };
+    });
+}
+"#;
+
+/// Injects `OpenRouter` routing and returns the `{ payload }` wrapper. It must
+/// observe the previous handler's rewrite (the raised `max_tokens`).
+const ROUTING_EXT: &str = r#"
+export default function init(pi) {
+    pi.on("before_provider_request", (event, ctx) => {
+        const seen = Array.isArray(event.payload.seen_by) ? event.payload.seen_by : [];
+        return {
+            payload: {
+                ...event.payload,
+                provider: { only: ["deepseek"], allow_fallbacks: false },
+                seen_by: [...seen, "routing"],
+                observed_max_tokens: event.payload.max_tokens,
+            },
+        };
+    });
+}
+"#;
+
+/// Mutates the payload in place and returns nothing.
+const IN_PLACE_EXT: &str = r#"
+export default function init(pi) {
+    pi.on("before_provider_request", (event, ctx) => {
+        event.payload.store = false;
+        event.payload.seen_by = [...(event.payload.seen_by || []), "in-place"];
+    });
+}
+"#;
+
+fn dispatch_before_provider_request(manager: &ExtensionManager, payload: Value) -> Value {
+    common::run_async({
+        let manager = manager.clone();
+        async move {
+            manager
+                .dispatch_event_with_response(
+                    ExtensionEventName::BeforeProviderRequest,
+                    Some(json!({
+                        "provider": "openrouter",
+                        "api": "openai-completions",
+                        "model": "deepseek/deepseek-v4-pro",
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "payload": payload,
+                    })),
+                    5000,
+                )
+                .await
+                .expect("dispatch before_provider_request")
+                .expect("chained handlers return a payload")
+        }
+    })
+}
+
+/// gh #219: handlers run in load order and each one sees the payload as
+/// rewritten by earlier handlers; the final request carries every rewrite,
+/// not just the last handler's.
+#[test]
+fn before_provider_request_handlers_chain_in_load_order() {
+    let harness = common::TestHarness::new("before_provider_request_handlers_chain_in_load_order");
+    let manager = load_js_extensions(
+        &harness,
+        &[
+            ("a_raise_max_tokens", RAISE_MAX_TOKENS_EXT),
+            ("b_routing", ROUTING_EXT),
+            ("c_in_place", IN_PLACE_EXT),
+        ],
+    );
+
+    let response = dispatch_before_provider_request(
+        &manager,
+        json!({"model": "deepseek/deepseek-v4-pro", "max_tokens": 8192, "stream": true}),
+    );
+    let payload = response
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| response.clone());
+
+    assert_eq!(
+        payload["max_tokens"], 65536,
+        "first handler's rewrite lost: {payload}"
+    );
+    assert_eq!(
+        payload["provider"]["only"][0], "deepseek",
+        "second handler's rewrite lost"
+    );
+    assert_eq!(payload["provider"]["allow_fallbacks"], false);
+    assert_eq!(
+        payload["observed_max_tokens"], 65536,
+        "second handler must see the first handler's payload"
+    );
+    assert_eq!(
+        payload["store"], false,
+        "in-place mutation with no return must reach the wire"
+    );
+    assert_eq!(payload["seen_by"], json!(["raise", "routing", "in-place"]));
+    assert_eq!(payload["model"], "deepseek/deepseek-v4-pro");
+    assert_eq!(payload["stream"], true);
+}
+
+/// A lone handler that returns nothing keeps the original payload intact.
+#[test]
+fn before_provider_request_single_passive_handler_keeps_payload() {
+    let harness =
+        common::TestHarness::new("before_provider_request_single_passive_handler_keeps_payload");
+    let manager = load_js_extensions(
+        &harness,
+        &[(
+            "passive",
+            r#"
+export default function init(pi) {
+    pi.on("before_provider_request", (event, ctx) => { return undefined; });
+}
+"#,
+        )],
+    );
+
+    let original =
+        json!({"model": "m", "max_tokens": 8192, "messages": [{"role": "user", "content": "hi"}]});
+    let response = dispatch_before_provider_request(&manager, original.clone());
+    assert_eq!(response["payload"], original);
 }

@@ -91,6 +91,7 @@ fn dummy_model_entry() -> ModelEntry {
         reasoning: false,
         input: vec![InputType::Text],
         cost: ModelCost {
+            audio: None,
             input: 0.0,
             output: 0.0,
             cache_read: 0.0,
@@ -153,6 +154,7 @@ fn create_bench_app() -> PiApp {
         model_entry,
         model_scope,
         available_models,
+        None,
         Vec::new(),
         event_tx,
         bench_runtime_handle(),
@@ -162,6 +164,7 @@ fn create_bench_app() -> PiApp {
         Some(KeyBindings::new()),
         Vec::new(),
         Usage::default(),
+        None,
     );
     app.set_terminal_size(120, 40);
     app
@@ -240,9 +243,17 @@ fn generate_conversation(n: usize) -> Vec<ConversationMessage> {
 }
 
 fn load_conversation(app: &mut PiApp, messages: Vec<ConversationMessage>) {
+    let session = app.session_handle();
+    let session_id = session
+        .try_lock()
+        .expect("lock session for conversation reset")
+        .header
+        .id
+        .clone();
     let _ = BubbleteaModel::update(
         app,
         Message::new(PiMsg::ConversationReset {
+            session_id,
             messages,
             usage: Usage::default(),
             status: None,

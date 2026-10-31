@@ -8,31 +8,26 @@
         "method": "POST",
         "url": "https://gitlab.com/api/v4/chat/completions",
         "headers": [
-          [
-            "Authorization",
-            "Bearer [REDACTED]"
-          ],
-          [
-            "Content-Type",
-            "application/json"
-          ],
-          [
-            "Accept",
-            "application/json"
+          ["Authorization", "Bearer [REDACTED]"],
+          ["Content-Type", "application/json"],
+          ["Accept", "application/json"]
+        ],
+        "body": {
+          "content": "Respond with exactly: '日本語テスト — émojis: 🦀🔥'",
+          "with_clean_history": true,
+          "additional_context": [
+            {
+              "category": "file",
+              "id": "system-prompt",
+              "content": "[System]: You are a test harness model. Follow instructions precisely and deterministically."
+            }
           ]
-        ]
+        }
       },
       "response": {
         "status": 200,
-        "headers": [
-          [
-            "Content-Type",
-            "application/json"
-          ]
-        ],
-        "body_chunks": [
-          "{\"response\":\"日本語テスト — émojis: 🦀🔥\"}"
-        ]
+        "headers": [["Content-Type", "application/json"]],
+        "body_chunks": ["\"日本語テスト — émojis: 🦀🔥\""]
       }
     }
   ]

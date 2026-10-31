@@ -1,3 +1,8 @@
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
+
 //! E2E: Long-run soak tests with stability metrics (bd-1f42.3.5).
 //!
 //! Deterministic soak scenarios that exercise prolonged sessions, repeated tool
@@ -98,6 +103,7 @@ fn make_assistant(
             ..Usage::default()
         },
         stop_reason,
+        stop_details: None,
         error_message: None,
         timestamp: 0,
     }
@@ -111,6 +117,7 @@ fn stream_done(msg: AssistantMessage) -> Pin<Box<dyn Stream<Item = Result<Stream
         model: msg.model.clone(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        stop_details: None,
         error_message: None,
         timestamp: 0,
     };
@@ -158,9 +165,17 @@ const fn event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionEnd { .. } => "tool_end",
         AgentEvent::AutoCompactionStart { .. } => "auto_compaction_start",
         AgentEvent::AutoCompactionEnd { .. } => "auto_compaction_end",
+        AgentEvent::ManualCompactionStart { .. } => "manual_compaction_start",
+        AgentEvent::ManualCompactionEnd { .. } => "manual_compaction_end",
         AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
         AgentEvent::AutoRetryEnd { .. } => "auto_retry_end",
+        AgentEvent::FailoverStart { .. } => "failover_start",
+        AgentEvent::FailoverEnd { .. } => "failover_end",
+        AgentEvent::PrewalkSwitched { .. } => "prewalk_switched",
         AgentEvent::ExtensionError { .. } => "extension_error",
+        AgentEvent::AdvisorNote { .. } => "advisor_note",
+        AgentEvent::CostWarning { .. } => "cost_warning",
+        AgentEvent::ProviderError { .. } => "provider_error",
     }
 }
 
@@ -381,7 +396,7 @@ impl Provider for RepeatedToolProvider {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
         let path = self.file_path.lock().expect("lock path").clone();
 
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             // Even: issue a read tool call
             Ok(stream_done(make_assistant(
                 StopReason::ToolUse,
@@ -442,7 +457,7 @@ impl Provider for IntermittentErrorProvider {
         _options: &StreamOptions,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let index = self.call_count.fetch_add(1, Ordering::SeqCst);
-        if index % self.fail_every_n == 0 && index > 0 {
+        if index.is_multiple_of(self.fail_every_n) && index > 0 {
             return Err(Error::api(format!(
                 "soak intermittent error at call {index}"
             )));

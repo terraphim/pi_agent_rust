@@ -1,3 +1,10 @@
+// Integration tests are separate crates, so the crate-level `recursion_limit`
+// raised in src/lib.rs does not reach here. This file's nested async blocks
+// exceed the default 128 while the compiler proves `Send` for the session
+// future (line ~428), which nightly-2026-08-31 reports as a
+// `future_incompatible` warning and `-D warnings` makes fatal.
+#![recursion_limit = "256"]
+
 //! E2E: Message injection + session control with verbose logging (bd-2ok9).
 //!
 //! This test loads JS extensions that call message injection and session control
@@ -22,7 +29,7 @@ use pi::compaction::ResolvedCompactionSettings;
 use pi::error::Result;
 use pi::extensions::{
     ExtensionHostActions, ExtensionManager, ExtensionSendMessage, ExtensionSendUserMessage,
-    ExtensionSession, JsExtensionLoadSpec, JsExtensionRuntimeHandle,
+    ExtensionSession, JsExtensionLoadSpec, JsExtensionRuntimeHandle, SessionActionOrigin,
 };
 use pi::extensions_js::PiJsRuntimeConfig;
 use pi::model::{
@@ -49,11 +56,19 @@ struct RecordingHostActions {
 
 #[async_trait]
 impl ExtensionHostActions for RecordingHostActions {
-    async fn send_message(&self, message: ExtensionSendMessage) -> Result<()> {
+    async fn send_message(
+        &self,
+        message: ExtensionSendMessage,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.messages.lock().unwrap().push(message);
         Ok(())
     }
-    async fn send_user_message(&self, message: ExtensionSendUserMessage) -> Result<()> {
+    async fn send_user_message(
+        &self,
+        message: ExtensionSendUserMessage,
+        _origin: Option<SessionActionOrigin>,
+    ) -> Result<()> {
         self.user_messages.lock().unwrap().push(message);
         Ok(())
     }
@@ -89,6 +104,7 @@ impl Provider for IdleReplayProvider {
             model: self.model_id().to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         };
@@ -101,6 +117,7 @@ impl Provider for IdleReplayProvider {
             model: self.model_id().to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         };

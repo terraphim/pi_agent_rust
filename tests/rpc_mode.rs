@@ -1,4 +1,8 @@
 #![allow(clippy::similar_names)]
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
 #![allow(clippy::unnecessary_literal_bound)]
 #![allow(clippy::too_many_lines)]
 
@@ -183,19 +187,22 @@ fn rpc_get_state_and_prompt() {
 
         let options = RpcOptions {
             config: Config::default(),
+            working_directory: None,
             resources: ResourceLoader::empty(false),
             available_models: Vec::new(),
             scoped_models: Vec::new(),
             cli_api_key: None,
             auth,
             runtime_handle: handle.clone(),
+            ask_tool: None,
         };
 
         let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
         let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(1024);
         let out_rx = Arc::new(Mutex::new(out_rx));
 
-        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+        let server =
+            handle.spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
         // get_state
         let cx = asupersync::Cx::for_testing();
@@ -464,6 +471,7 @@ fn rpc_session_stats_counts_tool_calls_and_results() {
                     ..Usage::default()
                 },
                 stop_reason: StopReason::ToolUse,
+                stop_details: None,
                 error_message: None,
                 timestamp: now,
             },
@@ -490,19 +498,22 @@ fn rpc_session_stats_counts_tool_calls_and_results() {
 
         let options = RpcOptions {
             config: Config::default(),
+            working_directory: None,
             resources: ResourceLoader::empty(false),
             available_models: Vec::new(),
             scoped_models: Vec::new(),
             cli_api_key: None,
             auth,
             runtime_handle: handle.clone(),
+            ask_tool: None,
         };
 
         let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
         let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(1024);
         let out_rx = Arc::new(Mutex::new(out_rx));
 
-        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+        let server =
+            handle.spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
         let cx = asupersync::Cx::for_testing();
         in_tx

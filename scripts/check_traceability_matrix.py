@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, redirect_stdout
+import fnmatch
 import glob
 from io import StringIO
 import json
@@ -168,38 +169,114 @@ def extract_test_stem(path: str) -> str | None:
     return None
 
 
-def _git_tracked_test_stems(tests_dir: Path) -> set[str] | None:
-    """Return stems of git-tracked `tests/*.rs` files, or None if unavailable.
+def _git_ignored_test_stems(stems: set[str]) -> set[str] | None:
+    """Return which of `stems` git ignores, or None if git cannot answer.
 
-    Filtering by git-tracked-only avoids false positives from local-only repro
+    Filtering out ignored files avoids false positives from local-only repro
     files that developers keep around but are listed in `.gitignore` (e.g.,
-    `tests/edit_repro.rs`). CI checkouts only see tracked files, so reconciling
-    the matrix/classification against the same set keeps developer and CI runs
-    in agreement.
+    `tests/edit_repro.rs`), so developer and CI runs agree on the inventory.
+
+    This asks `git check-ignore`, which evaluates the ignore *rules*, rather
+    than `git ls-files`, which reads `.git/index`. The distinction is not
+    academic here: `rch` carries a compiled-in transfer exclusion for
+    `.git/index` (`rch config show`, `exclude_patterns`), so a remote worker
+    gets the working tree laid over whatever index its checkout already had.
+    `git ls-files` there reports a stale inventory that omits every newly added
+    test file — files Cargo has just compiled and run — and this gate failed on
+    each one. `check-ignore --no-index` answers from the rules alone and so
+    gives the same result on a laptop and on a worker.
+
+    `--no-index` trades one thing away deliberately: plain `check-ignore`
+    exempts a path that is in the index, so a file force-added despite matching
+    an ignore rule would count as present, while here it reads as ignored. That
+    case is a git anti-pattern, does not occur in this repo, and buying it back
+    means reading the index again — which is the whole problem.
+
+    Exit 0 means at least one path is ignored, 1 means none are; anything else
+    means git could not answer and the caller should fall back.
     """
+
+    if not stems:
+        return set()
 
     try:
         result = subprocess.run(
-            ["git", "ls-files", "--", "tests/*.rs"],
+            ["git", "check-ignore", "--no-index", "--"]
+            + [f"tests/{stem}.rs" for stem in sorted(stems)],
             cwd=str(REPO_ROOT),
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except OSError:
+        # No git on PATH, or it could not be executed at all.
+        return None
+    if result.returncode not in (0, 1):
         return None
 
-    stems: set[str] = set()
+    ignored: set[str] = set()
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line.startswith("tests/") or not line.endswith(".rs"):
             continue
-        # Only top-level `tests/*.rs` (matches the existing glob behaviour).
         rel = line[len("tests/") : -len(".rs")]
         if "/" in rel:
             continue
-        stems.add(rel)
-    return stems
+        ignored.add(rel)
+    return ignored
+
+
+def _gitignored_top_level_test_stems(tests_dir: Path) -> set[str]:
+    """Return top-level test stems ignored by ordered `.gitignore` rules.
+
+    RCH worker overlays intentionally omit `.git` metadata and can retain a
+    previously transferred ignored repro. This metadata-free fallback applies
+    the repository's ordered wildcard and negation rules to the deliberately
+    narrow `tests/*.rs` inventory instead of treating wildcard rules as if they
+    did not exist.
+    """
+
+    ignore_path = REPO_ROOT / ".gitignore"
+    try:
+        lines = ignore_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+
+    ignored: set[str] = set()
+    for test_path in sorted(tests_dir.glob("*.rs")):
+        relative = test_path.relative_to(REPO_ROOT).as_posix()
+        is_ignored = False
+        for raw in lines:
+            rule = raw.strip()
+            if not rule or rule.startswith("#"):
+                continue
+
+            negated = rule.startswith("!")
+            if negated:
+                rule = rule[1:]
+            elif rule.startswith(r"\!"):
+                rule = rule[1:]
+            if rule.startswith(r"\#"):
+                rule = rule[1:]
+            if not rule:
+                continue
+
+            directory_rule = rule.endswith("/")
+            rule = rule.lstrip("/").rstrip("/")
+            if not rule:
+                continue
+            if "/" in rule:
+                matches = fnmatch.fnmatchcase(relative, rule)
+                if directory_rule:
+                    matches = relative.startswith(f"{rule}/")
+            else:
+                matches = fnmatch.fnmatchcase(test_path.name, rule)
+            if matches:
+                is_ignored = not negated
+
+        if is_ignored:
+            ignored.add(test_path.stem)
+    return ignored
 
 
 def check_stale_mappings(
@@ -232,18 +309,19 @@ def check_stale_mappings(
 
     matrix_test_stems = extract_matrix_test_stems(matrix)
 
-    # On-disk test files. Only count git-tracked files so that local-only
-    # developer repro files (gitignored) don't trigger spurious classification
-    # mismatches between developer machines and CI checkouts.
+    # On-disk test files: every top-level `tests/*.rs` Cargo would build as a
+    # test target, minus the ones git ignores, so local-only developer repro
+    # files don't trigger spurious classification mismatches between developer
+    # machines, CI checkouts and rch workers. See `_git_ignored_test_stems` for
+    # why this asks the ignore rules rather than the index.
     tests_dir = REPO_ROOT / "tests"
-    on_disk_stems: set[str] = set()
-    tracked_stems = _git_tracked_test_stems(tests_dir)
-    if tracked_stems is None:
-        # Not a git checkout (or git unavailable): fall back to filesystem scan.
-        for f in sorted(tests_dir.glob("*.rs")):
-            on_disk_stems.add(f.stem)
-    else:
-        on_disk_stems = tracked_stems
+    # `mod.rs` is a shared module, never its own test target.
+    present_stems = {f.stem for f in sorted(tests_dir.glob("*.rs")) if f.stem != "mod"}
+    ignored_stems = _git_ignored_test_stems(present_stems)
+    if ignored_stems is None:
+        # Git cannot answer (no git, not a checkout): evaluate the rules here.
+        ignored_stems = _gitignored_top_level_test_stems(tests_dir)
+    on_disk_stems = present_stems - ignored_stems
 
     stats["on_disk"] = len(on_disk_stems)
     stats["classified"] = len(classified_stems)
@@ -830,6 +908,41 @@ def run_self_test() -> int:
         code, output = run_fixture_check(repo_root)
     assert_self_test(code == 0, "valid fixture should pass")
     assert_self_test("TRACEABILITY CHECK PASSED" in output, "pass output should report success")
+
+    with TemporaryDirectory(prefix="traceability-gitignore-wildcard-") as tmp:
+        repo_root = Path(tmp)
+        write_fixture_repo(repo_root)
+        (repo_root / "tests" / "ignored_repro.rs").write_text(
+            "// ignored fixture repro\n", encoding="utf-8"
+        )
+        (repo_root / ".gitignore").write_text(
+            "/tests/*.rs\n!/tests/unit_one.rs\n!/tests/e2e_one.rs\n",
+            encoding="utf-8",
+        )
+        code, output = run_fixture_check(repo_root)
+    assert_self_test(code == 0, "wildcard-ignored repro should not enter test inventory")
+    assert_self_test(
+        "TRACEABILITY CHECK PASSED" in output,
+        "wildcard-ignore fixture should report success",
+    )
+
+    def add_negated_unclassified_test(repo_root: Path) -> None:
+        (repo_root / "tests" / "reincluded.rs").write_text(
+            "// explicitly reincluded fixture\n", encoding="utf-8"
+        )
+        (repo_root / ".gitignore").write_text(
+            "/tests/*.rs\n"
+            "!/tests/unit_one.rs\n"
+            "!/tests/e2e_one.rs\n"
+            "!/tests/reincluded.rs\n",
+            encoding="utf-8",
+        )
+
+    run_self_test_case(
+        "gitignore-negation",
+        add_negated_unclassified_test,
+        "tests/reincluded.rs is on disk but missing from suite_classification.toml",
+    )
 
     def remove_required_category(repo_root: Path) -> None:
         matrix = read_fixture_json(repo_root, "docs/traceability_matrix.json")

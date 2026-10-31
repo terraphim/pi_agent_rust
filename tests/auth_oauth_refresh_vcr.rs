@@ -6,6 +6,7 @@ use pi::http::client::Client;
 use pi::vcr::{VcrMode, VcrRecorder};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ fn cassette_root() -> PathBuf {
 fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    pi::package_manager::hex_encode(&hasher.finalize())
 }
 
 fn read_json(path: &Path) -> Value {
@@ -29,7 +30,10 @@ fn redact_auth_json(value: &mut Value) -> usize {
         Value::Object(map) => {
             let mut redacted = 0usize;
             for (key, child) in map.iter_mut() {
-                if matches!(key.as_str(), "access_token" | "refresh_token" | "key") {
+                if matches!(
+                    key.as_str(),
+                    "access" | "refresh" | "access_token" | "refresh_token" | "key"
+                ) {
                     if !child.is_null() {
                         *child = Value::String("[REDACTED]".to_string());
                         redacted = redacted.saturating_add(1);
@@ -140,6 +144,7 @@ async fn run_refresh_scenario(
     auth.set(
         "anthropic",
         AuthCredential::OAuth {
+            extra: HashMap::default(),
             access_token: old_access.clone(),
             refresh_token: old_refresh.clone(),
             expires: near_expiry,
@@ -180,8 +185,8 @@ async fn run_refresh_scenario(
 
     let after_json = read_json(&auth_path);
     let entry = oauth_entry(&after_json, "anthropic");
-    let after_access = oauth_field(entry, "access_token");
-    let after_refresh = oauth_field(entry, "refresh_token");
+    let after_access = oauth_field(entry, "access");
+    let after_refresh = oauth_field(entry, "refresh");
     let after_expires = entry
         .get("expires")
         .and_then(Value::as_i64)
@@ -438,6 +443,7 @@ fn auth_oauth_refresh_race_condition_vcr() {
         auth.set(
             "anthropic",
             AuthCredential::OAuth {
+                extra: HashMap::default(),
                 access_token: "race-old-access".to_string(),
                 refresh_token: "refresh-success".to_string(),
                 expires: chrono::Utc::now().timestamp_millis() + 5 * 60 * 1000,
@@ -517,8 +523,8 @@ fn auth_oauth_refresh_race_condition_vcr() {
 
         let after_json = read_json(&auth_path);
         let entry = oauth_entry(&after_json, "anthropic");
-        let after_access = oauth_field(entry, "access_token");
-        let after_refresh = oauth_field(entry, "refresh_token");
+        let after_access = oauth_field(entry, "access");
+        let after_refresh = oauth_field(entry, "refresh");
         let after_expires = entry
             .get("expires")
             .and_then(Value::as_i64)

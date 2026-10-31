@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "program_issue_id": "bd-k5q5.7",
   "program_title": "Comprehensive Verification Program: unit tests, end-to-end scripts, and detailed diagnostics logging",
-  "updated_at": "2026-05-10",
+  "updated_at": "2026-09-02",
   "ci_policy": {
     "required_categories": [
       "unit_tests",
@@ -72,6 +72,10 @@
         {
           "path": "tests/e2e_workflow_preflight.rs",
           "justification": "Validates preflight workflow expectations before end-to-end runtime execution."
+        },
+        {
+          "path": "tests/e2e_resource_load_failure.rs",
+          "justification": "A configured package that fails to install or resolve exits 4 with a machine-readable resource.load_failed record, exits 1 when an explicit -e path is supplied, and stays silent on a healthy run (gh #223 / bd-fpaso)."
         },
         {
           "path": "tests/e2e_swarm_flight_recorder.rs",
@@ -154,12 +158,20 @@
           "justification": "Agent-loop interruption/retry/resume reliability scenarios with timeline artifact coverage."
         },
         {
+          "path": "tests/e2e_transient_retry_resume.rs",
+          "justification": "Transient-failure auto-retry must resume the interrupted turn instead of replaying it (no duplicate tool execution or re-billed tokens)."
+        },
+        {
           "path": "tests/auth_oauth_refresh_vcr.rs",
           "justification": "OAuth refresh-path behavior and token lifecycle checks using deterministic VCR traces."
         },
         {
           "path": "tests/http_client.rs",
           "justification": "HTTP client request/response behavior and transport-level diagnostics coverage."
+        },
+        {
+          "path": "tests/http_proxy.rs",
+          "justification": "Proxy wiring for the HTTP client (gh #210): the client dials the configured proxy, uses absolute-form for http:// targets, and forwards the response, proved against a loopback listener with no external network."
         },
         {
           "path": "tests/main_cli_selection.rs",
@@ -176,6 +188,14 @@
         {
           "path": "tests/provider_streaming.rs",
           "justification": "Streaming provider behavior and event-shape stability across runtimes."
+        },
+        {
+          "path": "tests/provider_bedrock_streaming.rs",
+          "justification": "Bedrock streaming against a loopback fixture: signed reasoning and tool calls surviving stream/session/replay, credential redaction in errors, and truncated or corrupt streams never emitting done."
+        },
+        {
+          "path": "tests/agent_cx_io.rs",
+          "justification": "Scoped-I/O regressions driven through real loopback sockets and providers, with no remote credentials or external network."
         },
         {
           "path": "tests/resource_loader.rs",
@@ -208,6 +228,22 @@
         {
           "path": "tests/session_sqlite.rs",
           "justification": "SQLite-backed session persistence and retrieval correctness checks."
+        },
+        {
+          "path": "tests/session_workdir_recovery.rs",
+          "justification": "Explicit session workdir attachment (bd-yutps): bindings survive JSONL/SQLite save and reopen, and SDK resume binds configuration and real tools to the saved workspace or rejects a mismatched or missing one."
+        },
+        {
+          "path": "tests/session_text_recovery.rs",
+          "justification": "Session text recovery exercised as an SDK consumer, without internal helpers or credentials."
+        },
+        {
+          "path": "tests/session_control_native_prompts.rs",
+          "justification": "Controlled-content entrypoints through the native SDK, OpenAI transport, SSE parser, read tool and session store; only the remote HTTP peer is a loopback fixture."
+        },
+        {
+          "path": "tests/compaction_privacy_wire.rs",
+          "justification": "Compaction privacy through the native OpenAI-compatible HTTP/SSE boundary; only the remote endpoint is a loopback fixture."
         },
         {
           "path": "tests/sse_strict_compliance.rs",
@@ -272,6 +308,14 @@
         {
           "path": "tests/ext_entry_scan.rs",
           "justification": "Extension entry scanning and discovery behavior verification."
+        },
+        {
+          "path": "tests/extension_event_parity.rs",
+          "justification": "Behavioural parity: one fixture extension driven through every agent-driving surface on one scripted turn, with the delivered observation-event streams compared and a per-surface JSONL artifact. Catches a surface whose routing call is present but whose session cannot use it (bd-82331)."
+        },
+        {
+          "path": "tests/extension_event_routing.rs",
+          "justification": "Every agent-driving surface routes observation events to extensions, and the inventory of surfaces is complete. Guards the per-surface obligation that has no compiler support (bd-82331)."
         },
         {
           "path": "tests/ext_inclusion_list.rs",
@@ -344,6 +388,10 @@
         {
           "path": "tests/extensions_process_shim.rs",
           "justification": "Process shim runtime behavior and compatibility checks for extensions."
+        },
+        {
+          "path": "tests/extensions_provider_numeric.rs",
+          "justification": "Extension provider numeric decoding and QuickJS number tagging coverage."
         },
         {
           "path": "tests/extensions_provider_oauth.rs",
@@ -806,6 +854,10 @@
           "justification": "Classified vcr suite included in the bd-8t27h.3 traceability backfill so CI governance covers all registered tests."
         },
         {
+          "path": "tests/sdk_multimodal.rs",
+          "justification": "SDK image prompts over a loopback provider fixture: retry, failover, abort and durable-save fencing with attachments."
+        },
+        {
           "path": "tests/context_intelligence_closeout_gate_contract.rs",
           "justification": "Classified traceability repair suite included so CI governance covers the context-intelligence closeout contract and evidence guard."
         },
@@ -888,6 +940,18 @@
         {
           "path": "tests/validation_broker_store.rs",
           "justification": "Classified traceability repair suite included so CI governance covers validation broker slot-store and normalization behavior."
+        },
+        {
+          "path": "tests/hostcall_egraph.rs",
+          "justification": "Hostcall e-graph optimisation: roundtrip elimination/fusion, budget-exhaustion fallback, and the disabled kill switch."
+        },
+        {
+          "path": "tests/pmu_telemetry.rs",
+          "justification": "PMU telemetry derived metrics, budget evaluation, and opportunity ranking."
+        },
+        {
+          "path": "tests/edit_repro.rs",
+          "justification": "Edit tool reproduction for unicode normalization mismatches."
         }
       ],
       "e2e_scripts": [
@@ -1120,6 +1184,22 @@
           "justification": "HTTP shim behavior coverage."
         },
         {
+          "path": "tests/node_http_lifecycle.rs",
+          "justification": "Terminal ownership for node:http relay requests (#270): shared cases replace only fetch's I/O boundary, and the final case cancels a real PiJS streaming hostcall after headers."
+        },
+        {
+          "path": "tests/undici_shim.rs",
+          "justification": "Regression coverage for pi-freeflow's optional Undici dispatcher import."
+        },
+        {
+          "path": "tests/virtual_http_request_body.rs",
+          "justification": "Request-body lifecycle through PiJS's owned virtual HTTP route (#270): pause and resume, destroy, callback errors, early responses, cancellation and split UTF-8, without binding a socket."
+        },
+        {
+          "path": "tests/virtual_http_server.rs",
+          "justification": "Isolated in-process loopback transport for daemon-shaped extensions such as pi-freeflow; no OS listener and no external network."
+        },
+        {
           "path": "tests/npm_module_stubs.rs",
           "justification": "Module-level runtime compatibility checks."
         },
@@ -1190,6 +1270,10 @@
         {
           "path": "tests/extensions_provider_streaming.rs",
           "justification": "Provider-path extension runtime behavior support."
+        },
+        {
+          "path": "tests/extension_stream_terminal.rs",
+          "justification": "Extension provider terminals through QuickJS and the real agent: incomplete or inconsistent streams never execute tools."
         },
         {
           "path": "tests/extension_auto_repair_integration.rs",
@@ -1440,6 +1524,58 @@
         {
           "path": "tests/release_evidence_gate.rs",
           "justification": "Release gate validating evidence bundle completeness, schema, thresholds, and exception policy."
+        },
+        {
+          "path": "tests/clean_release_commit.rs",
+          "justification": "Drop-in certification contract schema/gates and the clean-release-commit script execution path."
+        },
+        {
+          "path": "tests/release_evidence_ledger.rs",
+          "justification": "Release evidence ledger contract schema/policy and live ledger verification with safe path resolution."
+        },
+        {
+          "path": "tests/waiver_ledger.rs",
+          "justification": "Waiver ledger contract and evidence schema, contract references, and active-waiver lifecycle validity."
+        },
+        {
+          "path": "tests/readme_evidence_checker.rs",
+          "justification": "Keeps scripts/check_readme_evidence_freshness.py honest inside the DSR lane (self-test and pinned inventory hash)."
+        },
+        {
+          "path": "tests/readme_tool_inventory.rs",
+          "justification": "README tool-inventory drift guard against the registered tool set (bd-dwh6g)."
+        },
+        {
+          "path": "tests/nrun_evidence_protocol.rs",
+          "justification": "N-run evidence protocol contract/schema, live artifact verification, and weighted-mean/effective-sample-size exactness."
+        },
+        {
+          "path": "tests/sequential_budget_gate.rs",
+          "justification": "Sequential budget gate contract, step-log likelihood-ratio conformance, Ville-inequality error control, and early stopping."
+        },
+        {
+          "path": "tests/variance_gating.rs",
+          "justification": "Variance gating contract, noise-score computation, and clean-run acceptance versus noisy-run rejection with named reasons."
+        },
+        {
+          "path": "tests/startup_benchmark.rs",
+          "justification": "Startup benchmark contract, percentile/bootstrap CI math, mock artifact verification, and tamper detection."
+        },
+        {
+          "path": "tests/perf_drift_watch.rs",
+          "justification": "Two-sided CUSUM drift watch over performance evidence series."
+        },
+        {
+          "path": "tests/dsr_recipe_preflight_test.rs",
+          "justification": "DSR perf recipe preflight checks (bd-ri-phase1-recipe-audit)."
+        },
+        {
+          "path": "tests/math_reachability_e2e_test.rs",
+          "justification": "Math technique reachability: every documented technique (CUSUM, BOCPD, conformal, PAC-Bayes, VOI, OCO) has a reachable test (bd-math-reachability-evidence)."
+        },
+        {
+          "path": "tests/conformal_budget_calibration.rs",
+          "justification": "Split-conformal calibration quantile thresholds with finite-sample coverage guarantees for budget evidence."
         }
       ],
       "e2e_scripts": [
@@ -1542,7 +1678,7 @@
     },
     {
       "id": "bd-f0huc",
-      "title": "SEC-2.1: Extension manifest v2 \u2014 explicit capabilities, behavioral intents, and trust metadata",
+      "title": "SEC-2.1: Extension manifest v2 — explicit capabilities, behavioral intents, and trust metadata",
       "acceptance_criteria": "Manifest v2 parsing, validation, and metadata extraction covered by unit tests.",
       "unit_tests": [
         {
@@ -1777,7 +1913,7 @@
     },
     {
       "id": "bd-3tb30",
-      "title": "SEC-3.4: Enforcement state machine \u2014 allow/harden/prompt/deny/terminate with hysteresis",
+      "title": "SEC-3.4: Enforcement state machine — allow/harden/prompt/deny/terminate with hysteresis",
       "acceptance_criteria": "State transitions, hysteresis logic, and edge cases covered by deterministic tests.",
       "unit_tests": [
         {
@@ -2090,6 +2226,410 @@
           "path": "tests/ext_conformance/reports/**/*.json",
           "generated_by_ci": true,
           "justification": "Structured extension conformance reports generated by CI for security and runtime evidence."
+        }
+      ]
+    },
+    {
+      "id": "bd-cv653",
+      "title": "v0.3.0 capability wave: advisor, plan mode, subagents, web tools, LSP/DAP, MCP, eval, session primitives",
+      "acceptance_criteria": "Every capability-wave surface (advisor, plan mode, subagent roles, failover, web search, URL read, xdev, LSP/DAP, MCP, eval, checkpoints, stream rules, magic keywords, worktree isolation, managed skills, and supporting runtime surfaces) is covered by deterministic tests with structured logs and CI-consumable evidence.",
+      "unit_tests": [
+        {
+          "path": "tests/ast_tools.rs",
+          "justification": "AST tool suite behavior over real parser fixtures (bd-cv653.1)."
+        },
+        {
+          "path": "tests/bash_mediation.rs",
+          "justification": "Bash mediation policy decisions for mediated tool execution."
+        },
+        {
+          "path": "tests/checkpoint.rs",
+          "justification": "Session checkpoint/rewind/fresh/retry primitives (bd-cv653.3.7)."
+        },
+        {
+          "path": "tests/commit_split.rs",
+          "justification": "Commit-split workflow logic and diff partitioning."
+        },
+        {
+          "path": "tests/debug.rs",
+          "justification": "DAP debug bridge sessions and adapter management."
+        },
+        {
+          "path": "tests/e2e_advisor.rs",
+          "justification": "Advisor concern injection and failure isolation over RPC (bd-cv653.3.3)."
+        },
+        {
+          "path": "tests/e2e_ast_tools.rs",
+          "justification": "AST tools driven through the real binary end-to-end."
+        },
+        {
+          "path": "tests/e2e_failover.rs",
+          "justification": "Cross-model failover, auth refusal, and credential rotation against loopback providers (bd-cv653.3.2)."
+        },
+        {
+          "path": "tests/e2e_foreign_rules.rs",
+          "justification": "Foreign rules discovery and application end-to-end."
+        },
+        {
+          "path": "tests/e2e_ftui.rs",
+          "justification": "FTUI interactive surface exercised under tmux."
+        },
+        {
+          "path": "tests/ftui_conhost_console.rs",
+          "justification": "FTUI native Windows console-input lease and restoration on a real ConHost (opt-in lane)."
+        },
+        {
+          "path": "tests/ftui_reasoning_liveness.rs",
+          "justification": "FTUI mixed-width reasoning liveness (GH #255): wrap progress, stream/resume/abort, and a loopback SSE provider driven through SDK persistence, Program and ANSI presentation under supervised child deadlines."
+        },
+        {
+          "path": "tests/e2e_lsp.rs",
+          "justification": "LSP bridge exercised end-to-end through the real binary."
+        },
+        {
+          "path": "tests/e2e_plan_mode.rs",
+          "justification": "Plan mode block/submit/approve/execute over RPC (bd-cv653.3.5)."
+        },
+        {
+          "path": "tests/e2e_subagent_roles.rs",
+          "justification": "Subagent fan-out routing to task-role models over real processes (bd-cv653.3.1)."
+        },
+        {
+          "path": "tests/btw_tan.rs",
+          "justification": "Background /tan task-role child execution, automatic parent follow-up, TUI completion card, and session persistence (bd-cv653.3.16)."
+        },
+        {
+          "path": "tests/e2e_url_read.rs",
+          "justification": "URL reads: reader-mode conversion, SSRF denial, pagination (bd-cv653.2.2)."
+        },
+        {
+          "path": "tests/e2e_web_search.rs",
+          "justification": "web_search provider chain over real processes with loopback mocks (bd-cv653.2.1)."
+        },
+        {
+          "path": "tests/e2e_xdev.rs",
+          "justification": "xdev discoverable tool discovery/run/promotion over RPC (bd-cv653.1.6)."
+        },
+        {
+          "path": "tests/eval.rs",
+          "justification": "Eval harness and JS kernel behavior."
+        },
+        {
+          "path": "tests/fts5_spike.rs",
+          "justification": "Full-text search index behavior on the session store."
+        },
+        {
+          "path": "tests/gc.rs",
+          "justification": "Session garbage-collection policy and safety."
+        },
+        {
+          "path": "tests/handoff_generator.rs",
+          "justification": "Handoff document generation from session state."
+        },
+        {
+          "path": "tests/hub.rs",
+          "justification": "Hub packaging and install flows."
+        },
+        {
+          "path": "tests/jobs.rs",
+          "justification": "Background job orchestration and control."
+        },
+        {
+          "path": "tests/lsp.rs",
+          "justification": "LSP client, registry, JSON-RPC, and text-edit units."
+        },
+        {
+          "path": "tests/magic_keywords.rs",
+          "justification": "Magic keyword expansion in prompts (bd-cv653.3.6)."
+        },
+        {
+          "path": "tests/mcp.rs",
+          "justification": "MCP client configuration, transports, and trust decisions."
+        },
+        {
+          "path": "tests/memory.rs",
+          "justification": "Memory file loading, editing, and persistence."
+        },
+        {
+          "path": "tests/review.rs",
+          "justification": "Review workflow behavior."
+        },
+        {
+          "path": "tests/secrets.rs",
+          "justification": "Secret detection and redaction paths."
+        },
+        {
+          "path": "tests/self_update.rs",
+          "justification": "Self-update staging and rollback flow."
+        },
+        {
+          "path": "tests/session_import.rs",
+          "justification": "Foreign session import and conversion."
+        },
+        {
+          "path": "tests/skills_managed.rs",
+          "justification": "Managed skills lifecycle and lesson promotion."
+        },
+        {
+          "path": "tests/stream_rules.rs",
+          "justification": "Time-traveling stream rules with mid-stream abort/injection (bd-cv653.3.4)."
+        },
+        {
+          "path": "tests/url_router.rs",
+          "justification": "URL routing decisions across handlers."
+        },
+        {
+          "path": "tests/web_search_rungs.rs",
+          "justification": "Per-rung web-search adapters against loopback mocks (bd-cv653.2.1)."
+        },
+        {
+          "path": "tests/worktree_iso.rs",
+          "justification": "Worktree isolation primitives (bd-cv653.5.2)."
+        },
+        {
+          "path": "tests/agent_hub.rs",
+          "justification": "Session-scoped agent hub integration: registration, routing, and lifecycle of hub-managed agents (bd-cv653.5.3)."
+        },
+        {
+          "path": "tests/browser.rs",
+          "justification": "Browser tool schema/metadata, navigation, and tab lifecycle behaviour."
+        },
+        {
+          "path": "tests/browser_frames.rs",
+          "justification": "Browser frame selection preflight; the live Chromium iframe-input scenario runs in the DSR browser lane."
+        },
+        {
+          "path": "tests/browser_forms.rs",
+          "justification": "Browser form actions (select_option, set_checked): schema and preflight without a connection, and verification and replay counts against a loopback CDP peer; the live Chromium DOM scenarios run in the DSR browser lane."
+        },
+        {
+          "path": "tests/browser_remote_pointer.rs",
+          "justification": "Native pointer input (click, scroll) into an out-of-process iframe renderer; a live Chromium scenario that runs only in the DSR browser lane."
+        },
+        {
+          "path": "tests/browser_diagnostics.rs",
+          "justification": "Browser diagnostics through the actual BrowserTool HTTP/WebSocket route against a deterministic CDP peer; not live Chromium."
+        },
+        {
+          "path": "tests/browser_downloads.rs",
+          "justification": "Download admission and publication over real HTTP/WebSocket transport: routing, filesystem bytes and cleanup against a loopback CDP peer."
+        },
+        {
+          "path": "tests/browser_frame_uploads.rs",
+          "justification": "File uploads over real HTTP/WebSocket transport: routing and admission boundaries against a loopback CDP peer."
+        },
+        {
+          "path": "tests/browser_pointer.rs",
+          "justification": "Native pointer input through the public browser tool; the live Chromium scenarios run only in the DSR browser lane."
+        },
+        {
+          "path": "tests/browser_semantic_selectors.rs",
+          "justification": "Semantic locators through the public browser tool; live coverage requires explicit selection in the DSR browser lane."
+        },
+        {
+          "path": "tests/browser_snapshot_state.rs",
+          "justification": "Snapshot workflows through the production HTTP/WebSocket transport, with a peer supplying recorded-shaped accessibility responses."
+        },
+        {
+          "path": "tests/browser_storage_state.rs",
+          "justification": "Native storage-state admission checks, plus an opt-in real authentication round trip."
+        },
+        {
+          "path": "tests/browser_text_input.rs",
+          "justification": "Native text-input transport regressions against a loopback CDP peer."
+        },
+        {
+          "path": "tests/browser_wait.rs",
+          "justification": "Browser wait workflows through the public tool; real Chromium cases require explicit DSR selection."
+        },
+        {
+          "path": "tests/debug_attach.rs",
+          "justification": "Debug-tool loopback attachment against a deterministic DAP peer: registry ownership, configuration before running, and source-mapping validation."
+        },
+        {
+          "path": "tests/debug_sessions.rs",
+          "justification": "Conversation ownership through the real DebugTool registry and DAP transport, with a Python peer simulating an adapter."
+        },
+        {
+          "path": "tests/debug_terminal.rs",
+          "justification": "DebugTool terminal lifecycle with real PTY, process, input and output effects against a deterministic DAP peer."
+        },
+        {
+          "path": "tests/doctor_broker_native.rs",
+          "justification": "Doctor CLI producer and broker consumer exercised together, without swarm tools."
+        },
+        {
+          "path": "tests/eval_agent_recovery.rs",
+          "justification": "QuickJS and Python to native eval host bridge for agent recovery; no live child or model claim."
+        },
+        {
+          "path": "tests/eval_async_js.rs",
+          "justification": "JavaScript timers and async host calls through the reachable EvalTool."
+        },
+        {
+          "path": "tests/eval_batch_drain_handles.rs",
+          "justification": "Eval to native batch drain to invocation host, with controlled job snapshots."
+        },
+        {
+          "path": "tests/eval_bridge_ownership.rs",
+          "justification": "Cell-owned Python bridge calls through the public EvalTool."
+        },
+        {
+          "path": "tests/eval_browser_prelude.rs",
+          "justification": "QuickJS to native eval bridge browser prelude with a controlled host; not Chromium or CDP acceptance."
+        },
+        {
+          "path": "tests/eval_cell_imports.rs",
+          "justification": "Static imports through the public, conversation-owned retained eval tool."
+        },
+        {
+          "path": "tests/eval_data_modules.rs",
+          "justification": "Workspace data imports through the real EvalTool and conversation scope."
+        },
+        {
+          "path": "tests/eval_display.rs",
+          "justification": "Rich display output through the persistent Python EvalTool."
+        },
+        {
+          "path": "tests/eval_file_js.rs",
+          "justification": "File-backed JavaScript through the public EvalTool."
+        },
+        {
+          "path": "tests/eval_js_packages.rs",
+          "justification": "Installed ESM dependencies through the public retained eval tool."
+        },
+        {
+          "path": "tests/eval_live_display.rs",
+          "justification": "Live rich progress through the retained kernels and the public Tool API."
+        },
+        {
+          "path": "tests/eval_module_reload.rs",
+          "justification": "Module reload workflows through the public tool and the real QuickJS module loader."
+        },
+        {
+          "path": "tests/eval_modules.rs",
+          "justification": "Workspace ES modules through the public eval tool, including retained state and file-backed importer origins."
+        },
+        {
+          "path": "tests/eval_packages.rs",
+          "justification": "Offline wheel installs through EvalTool against a loopback package index; no external package index."
+        },
+        {
+          "path": "tests/eval_per_call.rs",
+          "justification": "Native lifecycle of disposable per-call eval interpreters."
+        },
+        {
+          "path": "tests/eval_python_bridge.rs",
+          "justification": "Python bridge ownership through the public EvalTool."
+        },
+        {
+          "path": "tests/eval_python_packages.rs",
+          "justification": "Offline package installation through the retained EvalTool, installing an inert local wheel into each test's private target."
+        },
+        {
+          "path": "tests/eval_python_rich.rs",
+          "justification": "Rich Python objects through the public EvalTool and native updates; optional scientific-library cases are separate from the stdlib-only lane."
+        },
+        {
+          "path": "tests/eval_soft_timeout.rs",
+          "justification": "Opt-in recoverable Python deadlines through the public EvalTool."
+        },
+        {
+          "path": "tests/eval_typescript.rs",
+          "justification": "TypeScript ES modules through the public eval tool."
+        },
+        {
+          "path": "tests/goal_borrowed.rs",
+          "justification": "Borrowed goals through the real SDK, session and OpenAI wire implementation against a loopback protocol peer."
+        },
+        {
+          "path": "tests/goal_progress.rs",
+          "justification": "Native goal continuation through HTTP/SSE and the real read tool against a loopback peer."
+        },
+        {
+          "path": "tests/lsp_symbol_source.rs",
+          "justification": "Native tool-to-stdio semantic definition reads against a Python LSP peer, bound to source."
+        },
+        {
+          "path": "tests/url_notebook_read.rs",
+          "justification": "Public document-converter coverage of a saved Jupyter-format notebook fixture."
+        },
+        {
+          "path": "tests/browser_cdp.rs",
+          "justification": "Chromium session ownership over CDP: launch and teardown, DOM interaction, staged file uploads, and native page exports (bd-cv653.2.4)."
+        },
+        {
+          "path": "tests/computer.rs",
+          "justification": "Computer tool schema/metadata and display/window enumeration behaviour."
+        },
+        {
+          "path": "tests/media_tools.rs",
+          "justification": "inspect_image tool schema, fixture analysis, and missing-file error surfaces."
+        },
+        {
+          "path": "tests/web_remote.rs",
+          "justification": "Web remote frame protocol, client authentication/capacity limits, and QR console pairing rendering."
+        },
+        {
+          "path": "tests/web_security.rs",
+          "justification": "Web remote threat-model document validity, canary-secret obfuscation in frames, and local approval for remote mutating actions."
+        },
+        {
+          "path": "tests/e2e_ssh_workspace.rs",
+          "justification": "Fixture-sshd end-to-end coverage for ssh:// workspace tools (bd-cv653.6.5)."
+        },
+        {
+          "path": "tests/security_scan.rs",
+          "justification": "security_scan tool integration against seeded vulnerabilities (bd-cv653.2.6)."
+        },
+        {
+          "path": "tests/snapcompact.rs",
+          "justification": "Snapcompact compaction-mode unit tests (bd-cv653.7.6)."
+        },
+        {
+          "path": "tests/snapcompact_provider.rs",
+          "justification": "Snapcompact vision-model replay tests (bd-cv653.7.6, AC 2 and AC 4)."
+        },
+        {
+          "path": "tests/session_store_v2_ux.rs",
+          "justification": "Session store v2 UX: resume latency/tail reads and fork/export snapshot consistency including missing checkpoints."
+        },
+        {
+          "path": "tests/chrome_tui_integration.rs",
+          "justification": "Chrome-module integration into the TUI surface."
+        },
+        {
+          "path": "tests/gallery.rs",
+          "justification": "Gallery matrix schema and category coverage for the TUI showcase."
+        },
+        {
+          "path": "tests/markdown_rich.rs",
+          "justification": "Rich markdown rendering: syntax highlighting, math/hex swatches, OSC 8 links, and mermaid blocks."
+        },
+        {
+          "path": "tests/overlay_system.rs",
+          "justification": "Overlay system: toast queue lifecycle, welcome screen/tips, and overlay stack focus trap and Esc handling."
+        },
+        {
+          "path": "tests/delight.rs",
+          "justification": "Delight effects: shimmer intensity progression, unicode sparklines, and fireworks particle burst/decay."
+        },
+        {
+          "path": "tests/status_line.rs",
+          "justification": "Status line presets, responsive priority dropping, and session accent hue calculation."
+        }
+      ],
+      "e2e_scripts": [
+        {
+          "path": "scripts/e2e/run_all.sh",
+          "justification": "Canonical E2E runner that executes the capability-wave e2e suites with structured JSONL logs and artifact indexes."
+        }
+      ],
+      "evidence_logs": [
+        {
+          "path": "tests/e2e_results/**/*.jsonl",
+          "generated_by_ci": true,
+          "justification": "Structured JSONL run logs emitted by the capability-wave e2e suites per tests/common/logging.rs."
         }
       ]
     }

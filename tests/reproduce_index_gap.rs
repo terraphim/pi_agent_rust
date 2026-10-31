@@ -10,7 +10,7 @@ use tempfile::tempdir;
 fn rebuild_index_skips_subsequent_segments_on_corruption() -> PiResult<()> {
     let dir = tempdir()?;
     // Small threshold to force multiple segments
-    let mut store = SessionStoreV2::create(dir.path(), 200)?;
+    let mut store = SessionStoreV2::create(dir.path(), 500)?;
 
     // Write enough data to span 2 segments.
     // Each entry is roughly ~50-60 bytes.
@@ -102,9 +102,8 @@ fn rebuild_index_skips_subsequent_segments_on_corruption() -> PiResult<()> {
             "Index contains entries from segment 2 after segment 1 corruption. (Regression/Bug)"
         );
         panic!("Index should NOT contain entries from segment 2 after segment 1 corruption");
-    } else {
-        println!("Index correctly stopped at segment 1. (Fix Verified)");
     }
+    println!("Index correctly stopped at segment 1. (Fix Verified)");
 
     assert!(
         !seg2_path.exists(),

@@ -12,7 +12,87 @@ use pi::provider_metadata::{
     PROVIDER_METADATA, ProviderOnboardingMode, canonical_provider_id, provider_auth_env_keys,
     provider_metadata, provider_routing_defaults,
 };
-use std::collections::{HashMap, HashSet};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+fn provider_reference_strings(
+    document: &Value,
+    pointer: &str,
+    field: &str,
+) -> BTreeMap<String, Vec<String>> {
+    document
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .expect("provider reference must contain an entries array")
+        .iter()
+        .map(|entry| {
+            let canonical_id = entry["canonical_id"]
+                .as_str()
+                .expect("provider reference entry needs canonical_id")
+                .to_string();
+            let values = entry[field]
+                .as_array()
+                .expect("provider reference entry needs the requested string array")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("provider reference value must be a string")
+                        .to_string()
+                })
+                .collect();
+            (canonical_id, values)
+        })
+        .collect()
+}
+
+fn validate_method_reference_counts(
+    definitions: &serde_json::Map<String, Value>,
+    references: &BTreeMap<String, Vec<String>>,
+    label: &str,
+) {
+    for referenced in references.keys() {
+        assert!(
+            definitions.contains_key(referenced),
+            "{label} references undefined method '{referenced}'"
+        );
+    }
+
+    for (method, definition) in definitions {
+        let actual_providers = references.get(method).cloned().unwrap_or_default();
+        let expected_count = definition["providers_count"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{label} method '{method}' needs providers_count"));
+        assert_eq!(
+            actual_providers.len() as u64,
+            expected_count,
+            "{label} method '{method}' provider count drifted"
+        );
+
+        if let Some(documented) = definition.get("providers") {
+            let mut documented = documented
+                .as_array()
+                .unwrap_or_else(|| panic!("{label} method '{method}' providers must be an array"))
+                .iter()
+                .map(|provider| {
+                    provider
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            panic!("{label} method '{method}' provider must be a string")
+                        })
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            let mut actual = actual_providers;
+            documented.sort();
+            actual.sort();
+            assert_eq!(
+                actual, documented,
+                "{label} method '{method}' provider list drifted"
+            );
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Structural invariants
@@ -121,6 +201,8 @@ fn every_remote_provider_has_at_least_one_auth_env_key() {
     let auth_env_optional_providers = [
         "google-antigravity",
         "google-gemini-cli",
+        "llamacpp",
+        "mistralrs",
         "ollama",
         "openai-codex",
     ];
@@ -149,6 +231,275 @@ fn auth_env_keys_are_screaming_snake_case() {
             );
         }
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn provider_auth_reference_artifacts_match_runtime_metadata() {
+    let expected_aliases: BTreeMap<String, Vec<String>> = PROVIDER_METADATA
+        .iter()
+        .map(|meta| {
+            (
+                meta.canonical_id.to_string(),
+                meta.aliases.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect();
+    let crosswalk: Value =
+        serde_json::from_str(include_str!("../docs/provider-auth-crosswalk.json"))
+            .expect("provider auth crosswalk must be valid JSON");
+    let policy: Value =
+        serde_json::from_str(include_str!("../docs/provider-canonical-id-policy.json"))
+            .expect("provider canonical ID policy must be valid JSON");
+
+    assert_eq!(PROVIDER_METADATA.len(), 103);
+    assert_eq!(crosswalk["schema"], "pi.docs.provider_auth_crosswalk.v2");
+    assert!(crosswalk.get("api_key_resolution_precedence").is_none());
+    assert!(crosswalk.get("auth_method_patterns").is_none());
+    assert_eq!(
+        crosswalk["schema_migration_from_v1"]["renamed_sections"]["api_key_resolution_precedence"],
+        "generic_direct_credential_precedence"
+    );
+    assert_eq!(
+        crosswalk["schema_migration_from_v1"]["renamed_sections"]["auth_method_patterns"],
+        "request_auth_methods"
+    );
+    assert_eq!(crosswalk["providers"].as_array().map(Vec::len), Some(103));
+    assert_eq!(
+        policy["canonical_id_map"]["entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(103)
+    );
+    assert_eq!(
+        provider_reference_strings(&crosswalk, "/providers", "aliases"),
+        expected_aliases
+    );
+    assert_eq!(
+        provider_reference_strings(&policy, "/canonical_id_map/entries", "aliases"),
+        expected_aliases
+    );
+    let expected_env_keys: BTreeMap<String, Vec<String>> = PROVIDER_METADATA
+        .iter()
+        .map(|meta| {
+            (
+                meta.canonical_id.to_string(),
+                meta.auth_env_keys.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        provider_reference_strings(&crosswalk, "/providers", "env_keys"),
+        expected_env_keys
+    );
+
+    let precedence: Vec<&str> = crosswalk["generic_direct_credential_precedence"]["steps"]
+        .as_array()
+        .expect("auth crosswalk must contain precedence steps")
+        .iter()
+        .map(|step| {
+            step["source"]
+                .as_str()
+                .expect("precedence source must be a string")
+        })
+        .collect();
+    assert_eq!(
+        precedence,
+        [
+            "Explicit override parameter (--api-key CLI flag or programmatic override)",
+            "Stored OAuth or bearer credential in auth.json",
+            "Direct-token environment variables (checked in provider order)",
+            "Stored API key in auth.json",
+            "Supported external coding-CLI credential",
+        ]
+    );
+
+    let provider_rows = crosswalk["providers"]
+        .as_array()
+        .expect("auth crosswalk must contain provider rows");
+    let request_definitions = crosswalk["request_auth_methods"]
+        .as_object()
+        .expect("auth crosswalk must define request auth methods");
+    let mut request_references = BTreeMap::<String, Vec<String>>::new();
+    for provider in provider_rows {
+        let provider_id = provider["canonical_id"]
+            .as_str()
+            .expect("provider row needs canonical_id");
+        let primary = provider["auth_method"]
+            .as_str()
+            .expect("provider row needs a primary request auth method");
+        let mut methods = vec![primary];
+        if let Some(additional) = provider.get("additional_auth_methods") {
+            methods.extend(
+                additional
+                    .as_array()
+                    .expect("additional_auth_methods must be an array")
+                    .iter()
+                    .map(|method| {
+                        method
+                            .as_str()
+                            .expect("additional request auth method must be a string")
+                    }),
+            );
+        }
+        let mut unique = HashSet::new();
+        for method in methods {
+            assert!(
+                unique.insert(method),
+                "provider '{provider_id}' repeats request auth method '{method}'"
+            );
+            request_references
+                .entry(method.to_string())
+                .or_default()
+                .push(provider_id.to_string());
+        }
+    }
+    validate_method_reference_counts(request_definitions, &request_references, "request auth");
+
+    let acquisition = crosswalk["credential_acquisition"]
+        .as_object()
+        .expect("auth crosswalk must define credential acquisition");
+    let acquisition_definitions = acquisition["methods"]
+        .as_object()
+        .expect("credential acquisition must define methods");
+    let default_acquisition = acquisition["default_methods"]
+        .as_array()
+        .expect("credential acquisition must define defaults");
+    let acquisition_overrides = acquisition["overrides"]
+        .as_object()
+        .expect("credential acquisition overrides must be an object");
+    for provider_id in acquisition_overrides.keys() {
+        assert!(
+            expected_aliases.contains_key(provider_id),
+            "credential acquisition override references unknown provider '{provider_id}'"
+        );
+    }
+
+    let mut acquisition_references = BTreeMap::<String, Vec<String>>::new();
+    for provider in provider_rows {
+        let provider_id = provider["canonical_id"]
+            .as_str()
+            .expect("provider row needs canonical_id");
+        let methods =
+            acquisition_overrides
+                .get(provider_id)
+                .map_or(default_acquisition, |methods| {
+                    methods
+                        .as_array()
+                        .expect("credential acquisition override must be an array")
+                });
+        assert!(
+            !methods.is_empty(),
+            "provider '{provider_id}' needs at least one credential acquisition method"
+        );
+        let mut unique = HashSet::new();
+        for method in methods {
+            let method = method
+                .as_str()
+                .expect("credential acquisition method must be a string");
+            assert!(
+                unique.insert(method),
+                "provider '{provider_id}' repeats credential acquisition method '{method}'"
+            );
+            acquisition_references
+                .entry(method.to_string())
+                .or_default()
+                .push(provider_id.to_string());
+        }
+    }
+    validate_method_reference_counts(
+        acquisition_definitions,
+        &acquisition_references,
+        "credential acquisition",
+    );
+
+    let provider_request_methods = |provider_id: &str| {
+        let provider = provider_rows
+            .iter()
+            .find(|provider| provider["canonical_id"] == provider_id)
+            .unwrap_or_else(|| panic!("missing provider row '{provider_id}'"));
+        let mut methods = vec![
+            provider["auth_method"]
+                .as_str()
+                .expect("provider auth_method"),
+        ];
+        if let Some(additional) = provider.get("additional_auth_methods") {
+            methods.extend(
+                additional
+                    .as_array()
+                    .expect("additional request methods")
+                    .iter()
+                    .map(|method| method.as_str().expect("request method string")),
+            );
+        }
+        methods
+    };
+    let provider_acquisition_methods = |provider_id: &str| {
+        acquisition_overrides
+            .get(provider_id)
+            .map_or(default_acquisition, |methods| {
+                methods.as_array().expect("credential acquisition methods")
+            })
+            .iter()
+            .map(|method| method.as_str().expect("acquisition method string"))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        provider_request_methods("anthropic"),
+        ["x_api_key", "bearer_token"]
+    );
+    assert_eq!(
+        provider_acquisition_methods("anthropic"),
+        ["direct_api_key", "oauth_login", "external_cli_credentials"]
+    );
+    assert_eq!(
+        provider_request_methods("kimi-for-coding"),
+        ["x_api_key", "bearer_token"]
+    );
+    assert_eq!(
+        provider_acquisition_methods("kimi-for-coding"),
+        [
+            "direct_api_key",
+            "kimi_device_oauth",
+            "external_cli_credentials"
+        ]
+    );
+    assert_eq!(
+        provider_request_methods("amazon-bedrock"),
+        ["aws_sigv4", "bearer_token"]
+    );
+    assert_eq!(
+        provider_acquisition_methods("amazon-bedrock"),
+        ["aws_credential_chain", "direct_bearer_override"]
+    );
+    assert_eq!(provider_request_methods("sap-ai-core"), ["bearer_token"]);
+    assert_eq!(
+        provider_acquisition_methods("sap-ai-core"),
+        ["sap_client_credentials_exchange", "direct_bearer_override"]
+    );
+    assert_eq!(provider_request_methods("github-copilot"), ["bearer_token"]);
+    assert_eq!(
+        provider_acquisition_methods("github-copilot"),
+        [
+            "direct_api_key",
+            "oauth_login",
+            "copilot_device_oauth",
+            "copilot_session_exchange"
+        ]
+    );
+    assert_eq!(provider_request_methods("gitlab"), ["bearer_token"]);
+    assert_eq!(
+        provider_acquisition_methods("gitlab"),
+        ["direct_api_key", "oauth_login"]
+    );
+    for local in ["ollama", "llamacpp", "mistralrs"] {
+        assert_eq!(provider_request_methods(local), ["no_auth_required"]);
+        assert_eq!(provider_acquisition_methods(local), ["no_credentials"]);
+    }
+
+    assert!(!expected_aliases.contains_key("github-models"));
+    assert!(expected_aliases.contains_key("github-copilot"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -229,16 +580,16 @@ fn native_adapter_providers_routing_defaults_are_consistent() {
     // max_tokens, etc.) but their base_url is typically empty because they
     // construct URLs from provider-specific config (project/region/deployment).
     for meta in PROVIDER_METADATA {
-        if meta.onboarding == ProviderOnboardingMode::NativeAdapterRequired {
-            if let Some(defaults) = &meta.routing_defaults {
-                // Native providers with routing_defaults should have an
-                // API identifier (non-empty).
-                assert!(
-                    !defaults.api.is_empty(),
-                    "native-adapter provider '{}' has routing_defaults but empty api",
-                    meta.canonical_id
-                );
-            }
+        if meta.onboarding == ProviderOnboardingMode::NativeAdapterRequired
+            && let Some(defaults) = &meta.routing_defaults
+        {
+            // Native providers with routing_defaults should have an
+            // API identifier (non-empty).
+            assert!(
+                !defaults.api.is_empty(),
+                "native-adapter provider '{}' has routing_defaults but empty api",
+                meta.canonical_id
+            );
         }
     }
 }
@@ -249,14 +600,14 @@ fn all_oai_compatible_base_urls_are_nonempty() {
     // base_url because they construct endpoints from provider-specific config.
     // Only OpenAI-compatible presets require a non-empty base_url.
     for meta in PROVIDER_METADATA {
-        if meta.onboarding == ProviderOnboardingMode::OpenAICompatiblePreset {
-            if let Some(defaults) = &meta.routing_defaults {
-                assert!(
-                    !defaults.base_url.is_empty(),
-                    "OAI-compatible provider '{}' has empty base_url",
-                    meta.canonical_id
-                );
-            }
+        if meta.onboarding == ProviderOnboardingMode::OpenAICompatiblePreset
+            && let Some(defaults) = &meta.routing_defaults
+        {
+            assert!(
+                !defaults.base_url.is_empty(),
+                "OAI-compatible provider '{}' has empty base_url",
+                meta.canonical_id
+            );
         }
     }
 }
@@ -269,6 +620,13 @@ fn all_oai_compatible_base_urls_are_unique() {
         ("minimax-coding-plan", "minimax"),
         ("minimax-cn", "minimax-cn-coding-plan"),
         ("minimax-cn-coding-plan", "minimax-cn"),
+        // Local OpenAI-compatible servers that both default to 127.0.0.1:1234.
+        ("lmstudio", "mistralrs"),
+        ("mistralrs", "lmstudio"),
+        // CoreWeave powers W&B Inference; omp's coreweave descriptor is a
+        // second name for the wandb.ai endpoint (same base_url by design).
+        ("wandb", "coreweave"),
+        ("coreweave", "wandb"),
     ]);
     for meta in PROVIDER_METADATA {
         if let Some(defaults) = &meta.routing_defaults {
@@ -302,6 +660,7 @@ fn oai_compatible_defaults_use_known_api_family() {
         "bedrock-converse-stream",
         "gitlab-chat",
         "copilot-openai",
+        "cursor-agent",
     ];
     for meta in PROVIDER_METADATA {
         if let Some(defaults) = &meta.routing_defaults {
@@ -358,6 +717,7 @@ fn oai_entry(provider: &str, api: &str, base_url: &str) -> pi::models::ModelEntr
             reasoning: false,
             input: vec![InputType::Text],
             cost: ModelCost {
+                audio: None,
                 input: 0.001,
                 output: 0.002,
                 cache_read: 0.0,
@@ -416,6 +776,7 @@ fn factory_dispatches_native_established_providers() {
                 reasoning: false,
                 input: vec![InputType::Text],
                 cost: ModelCost {
+                    audio: None,
                     input: 0.003,
                     output: 0.015,
                     cache_read: 0.0,
@@ -448,6 +809,7 @@ fn factory_dispatches_native_established_providers() {
                 reasoning: false,
                 input: vec![InputType::Text],
                 cost: ModelCost {
+                    audio: None,
                     input: 0.001,
                     output: 0.004,
                     cache_read: 0.0,
@@ -480,6 +842,7 @@ fn factory_dispatches_native_established_providers() {
                 reasoning: false,
                 input: vec![InputType::Text],
                 cost: ModelCost {
+                    audio: None,
                     input: 0.003,
                     output: 0.015,
                     cache_read: 0.0,
@@ -512,6 +875,7 @@ fn factory_dispatches_native_established_providers() {
                 reasoning: true,
                 input: vec![InputType::Text],
                 cost: ModelCost {
+                    audio: None,
                     input: 0.0,
                     output: 0.0,
                     cache_read: 0.0,
@@ -564,7 +928,7 @@ fn total_aliases_count_is_consistent() {
 
 #[test]
 fn generate_canonical_id_alias_table_json() {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     let mut entries: Vec<Value> = Vec::new();
     for meta in PROVIDER_METADATA {
@@ -605,13 +969,28 @@ fn generate_canonical_id_alias_table_json() {
 
     let json_str = serde_json::to_string_pretty(&table).expect("JSON serialization");
 
-    // Write to docs directory
-    let path = std::path::Path::new("docs/provider-canonical-id-table.json");
-    std::fs::write(path, &json_str).expect("write canonical ID table");
+    // Ordinary test runs verify the committed table without mutating source.
+    // Maintainers can opt into regeneration explicitly when metadata changes.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/provider-canonical-id-table.json");
+    let generate = matches!(
+        std::env::var("PI_GENERATE_PROVIDER_CANONICAL_ID_TABLE").as_deref(),
+        Ok("1")
+    );
+    if generate {
+        std::fs::write(&path, &json_str).expect("write canonical ID table");
+    }
 
-    // Verify the file round-trips
-    let readback = std::fs::read_to_string(path).expect("read back");
+    // Verify the committed/generated file round-trips and exactly represents
+    // the metadata used by the running test binary.
+    let readback = std::fs::read_to_string(&path).expect("read canonical ID table");
     let parsed: Value = serde_json::from_str(&readback).expect("parse back");
+    assert_eq!(
+        parsed, table,
+        "committed provider canonical ID table is stale; regenerate explicitly with \
+         PI_GENERATE_PROVIDER_CANONICAL_ID_TABLE=1 cargo test \
+         --test provider_metadata_comprehensive generate_canonical_id_alias_table_json -- --exact"
+    );
     assert_eq!(
         usize::try_from(parsed["total_providers"].as_u64().unwrap()).unwrap(),
         PROVIDER_METADATA.len()
@@ -632,7 +1011,7 @@ fn generate_canonical_id_alias_table_json() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn canonical_id_snapshot_detects_additions_and_removals() {
-    // ── Snapshot: 91 canonical IDs (sorted) ─────────────────────────────
+    // ── Snapshot: 103 canonical IDs (sorted) ─────────────────────────────
     // To update: run the failing test, copy the "actual" list printed
     // below, and replace this array.
     const EXPECTED: &[&str] = &[
@@ -644,6 +1023,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "alibaba-us",
         "amazon-bedrock",
         "anthropic",
+        "atlascloud",
         "azure-openai",
         "bailing",
         "baseten",
@@ -653,7 +1033,9 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "cloudflare-ai-gateway",
         "cloudflare-workers-ai",
         "cohere",
+        "coreweave",
         "cortecs",
+        "cursor",
         "deepinfra",
         "deepseek",
         "fastrouter",
@@ -661,8 +1043,8 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "firmware",
         "friendli",
         "github-copilot",
-        "github-models",
         "gitlab",
+        "gmi",
         "google",
         "google-antigravity",
         "google-gemini-cli",
@@ -675,8 +1057,10 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "inference",
         "io-net",
         "jiekou",
+        "kilo",
         "kimi-for-coding",
         "llama",
+        "llamacpp",
         "lmstudio",
         "lucidquery",
         "minimax",
@@ -684,6 +1068,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "minimax-cn-coding-plan",
         "minimax-coding-plan",
         "mistral",
+        "mistralrs",
         "moark",
         "modelscope",
         "moonshotai",
@@ -699,12 +1084,16 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "openai",
         "openai-codex",
         "opencode",
+        "opencode-go",
         "openrouter",
+        "orcarouter",
         "ovhcloud",
         "perplexity",
         "poe",
         "privatemode-ai",
+        "qianfan",
         "requesty",
+        "sakana",
         "sap-ai-core",
         "scaleway",
         "siliconflow",
@@ -713,12 +1102,14 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "submodel",
         "synthetic",
         "togetherai",
+        "umans",
         "upstage",
         "v0",
         "venice",
         "vercel",
         "vivgrid",
         "vultr",
+        "wafer",
         "wandb",
         "xai",
         "xiaomi",
@@ -754,14 +1145,19 @@ fn alias_mapping_snapshot_is_current() {
     // ── Snapshot: alias → canonical_id (sorted by alias) ────────────────
     const EXPECTED_ALIASES: &[(&str, &str)] = &[
         ("antigravity", "google-antigravity"),
+        ("atlas", "atlascloud"),
+        ("atlas-cloud", "atlascloud"),
         ("azure", "azure-openai"),
         ("azure-cognitive-services", "azure-openai"),
         ("azure-openai-responses", "azure-openai"),
         ("azure_openai", "azure-openai"),
+        ("baidu-qianfan", "qianfan"),
         ("bedrock", "amazon-bedrock"),
         ("chatgpt-codex", "openai-codex"),
         ("codex", "openai-codex"),
         ("copilot", "github-copilot"),
+        ("coreweave-serverless", "coreweave"),
+        ("cursor-agent", "cursor"),
         ("dashscope", "alibaba"),
         ("deep-infra", "deepinfra"),
         ("deep-seek", "deepseek"),
@@ -771,14 +1167,23 @@ fn alias_mapping_snapshot_is_current() {
         ("github-copilot-enterprise", "github-copilot"),
         ("gitlab-duo", "gitlab"),
         ("glm", "zhipuai"),
+        ("gmi-cloud", "gmi"),
+        ("gmi-serving", "gmi"),
         ("google-vertex-anthropic", "google-vertex"),
         ("grok", "xai"),
         ("hf", "huggingface"),
         ("hugging-face", "huggingface"),
+        ("kilo-ai", "kilo"),
+        ("kilo-gateway", "kilo"),
         ("kimi", "moonshotai"),
         ("kimi-code", "kimi-for-coding"),
         ("kimi-coding", "kimi-for-coding"),
+        ("llama-cpp", "llamacpp"),
+        ("llama-server", "llamacpp"),
+        ("llama.cpp", "llamacpp"),
         ("lm-studio", "lmstudio"),
+        ("mistral-rs", "mistralrs"),
+        ("mistral.rs", "mistralrs"),
         ("mistralai", "mistral"),
         ("moonshot", "moonshotai"),
         ("nanogpt", "nano-gpt"),
@@ -786,14 +1191,19 @@ fn alias_mapping_snapshot_is_current() {
         ("novita", "novita-ai"),
         ("nvidia-nim", "nvidia"),
         ("open-router", "openrouter"),
+        ("opencode-zen", "opencode"),
+        ("orca", "orcarouter"),
         ("pplx", "perplexity"),
         ("qwen", "alibaba"),
+        ("sakana-ai", "sakana"),
         ("sap", "sap-ai-core"),
         ("silicon-flow", "siliconflow"),
         ("together", "togetherai"),
         ("together-ai", "togetherai"),
+        ("umans-ai", "umans"),
         ("vercel-ai-gateway", "vercel"),
         ("vertexai", "google-vertex"),
+        ("wafer-serverless", "wafer"),
         ("x-ai", "xai"),
         ("zhipu", "zhipuai"),
     ];
@@ -970,12 +1380,18 @@ fn no_accidental_duplicate_routing_defaults() {
     }
 
     // Known intentional duplicates: coding-plan variants share base_url
-    // with their parent.
+    // with their parent, and mistral.rs deliberately defaults to LM Studio's
+    // localhost port (both are local OpenAI-compatible servers on
+    // 127.0.0.1:1234).
     let intentional_pairs: HashSet<&str> = [
         "minimax-coding-plan",
         "minimax-cn-coding-plan",
         "zai-coding-plan",
         "zhipuai-coding-plan",
+        "mistralrs",
+        // CoreWeave powers W&B Inference: omp models it as a second name for
+        // the wandb.ai endpoint, so coreweave shares wandb's base_url.
+        "coreweave",
     ]
     .iter()
     .copied()
@@ -1002,5 +1418,47 @@ fn no_accidental_duplicate_routing_defaults() {
         "\n\nProviders sharing identical (api, base_url) routing defaults:\n{}\n\n\
          If intentional, add the new provider to intentional_pairs in this test.\n",
         violations.join("\n")
+    );
+}
+
+/// bd-cv653.7.3: docs/models.md carries a GENERATED provider table between
+/// `<!-- PROVIDER_TABLE:BEGIN -->` / `:END -->` markers. The checked-in section
+/// must match `render_provider_docs_table()` exactly; regenerate with
+/// `PI_BLESS_MODELS_DOC=1 cargo test --test provider_metadata_comprehensive`.
+#[test]
+fn docs_models_provider_table_matches_registry() {
+    const BEGIN: &str = "<!-- PROVIDER_TABLE:BEGIN -->";
+    const END: &str = "<!-- PROVIDER_TABLE:END -->";
+    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/models.md");
+    let doc = std::fs::read_to_string(&doc_path).expect("read docs/models.md");
+    let begin = doc
+        .find(BEGIN)
+        .unwrap_or_else(|| panic!("docs/models.md is missing {BEGIN}"));
+    let end = doc
+        .find(END)
+        .unwrap_or_else(|| panic!("docs/models.md is missing {END}"));
+    assert!(begin < end, "table markers out of order in docs/models.md");
+    let section = doc[begin + BEGIN.len()..end].trim().to_string();
+    let expected = pi::provider_metadata::render_provider_docs_table()
+        .trim()
+        .to_string();
+
+    if std::env::var_os("PI_BLESS_MODELS_DOC").is_some() {
+        // Bless path: regenerate the marked section in place.
+        let mut updated = String::with_capacity(doc.len() + expected.len());
+        updated.push_str(&doc[..begin + BEGIN.len()]);
+        updated.push_str("\n\n");
+        updated.push_str(&expected);
+        updated.push_str("\n\n");
+        updated.push_str(&doc[end..]);
+        std::fs::write(&doc_path, updated).expect("bless docs/models.md");
+        return;
+    }
+
+    assert_eq!(
+        section, expected,
+        "docs/models.md provider table is stale; regenerate with \
+         PI_BLESS_MODELS_DOC=1 cargo test --test provider_metadata_comprehensive \
+         docs_models_provider_table_matches_registry"
     );
 }

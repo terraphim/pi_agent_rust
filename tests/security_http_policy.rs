@@ -452,9 +452,12 @@ fn allowlist_denies_without_network_contact() {
         result.error.as_ref().unwrap().code,
         HostCallErrorCode::Denied
     );
-    // Policy denial should be near-instant (< 100ms), not a network timeout
+    // A network attempt to this unroutable address would block until the
+    // connector's 30s default timeout. 2s separates the two cleanly without
+    // turning scheduler delay on a loaded host into a failure (it measured
+    // 106ms against the old 100ms budget on a saturated rch worker).
     assert!(
-        elapsed.as_millis() < 100,
+        elapsed.as_millis() < 2_000,
         "denied request should not attempt network (took {}ms)",
         elapsed.as_millis()
     );
@@ -871,7 +874,9 @@ fn unsupported_method_rejected() {
         ..Default::default()
     });
 
-    for method in &["DELETE", "PUT", "PATCH", "OPTIONS"] {
+    // Deployment mutation verbs are supported; tunnelling, reflection, and
+    // methods whose response semantics are not implemented remain rejected.
+    for method in &["CONNECT", "TRACE", "HEAD", "OPTIONS", "CUSTOM"] {
         let call = http_call("http://example.com/", method);
         let result = run_async({
             let connector = HttpConnector::new(HttpConnectorConfig {

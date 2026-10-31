@@ -1,0 +1,49 @@
+{
+  "version": "1.0",
+  "tool": "computer",
+  "description": "Desktop automation contract for bd-cv653.2.5: explicit fixtures, required coordinates and named errors.",
+  "cases": [
+    {
+      "name": "computer_mock_lists_displays",
+      "description": "Explicit mock mode returns a marked deterministic inventory",
+      "requirement_ids": ["COMP-1"],
+      "input": { "action": "list_displays" },
+      "expected": {
+        "content_contains": [
+          "Found 2 display(s)",
+          "Built-in Retina Display",
+          "External 4K Monitor"
+        ],
+        "details_contains": ["\"width\": 2560", "\"width\": 3840", "\"mock\": true"]
+      }
+    },
+    {
+      "name": "computer_mouse_move_zero_boundary",
+      "description": "Explicit zero coordinates remain valid; omission is not accidental input at the origin",
+      "requirement_ids": ["COMP-2"],
+      "input": { "action": "mouse_move", "x": 0, "y": 0 },
+      "expected": {
+        "content_contains": ["mouse_move", "mock"],
+        "details_exact": { "action": "mouse_move", "x": 0, "y": 0, "button": "left", "mock": true }
+      }
+    },
+    {
+      "name": "computer_mouse_move_requires_coordinates",
+      "description": "Missing coordinates fail before desktop access",
+      "requirement_ids": ["COMP-2"],
+      "expect_error": true,
+      "error_contains": "both x and y",
+      "input": { "action": "mouse_move" },
+      "expected": {}
+    },
+    {
+      "name": "computer_unknown_action_error",
+      "description": "Unsupported action produces a named dispatch error",
+      "requirement_ids": ["COMP-3"],
+      "expect_error": true,
+      "error_contains": "unknown",
+      "input": { "action": "invalid_action_xyz" },
+      "expected": {}
+    }
+  ]
+}

@@ -42,6 +42,7 @@ fn make_assistant_message(text: &str) -> SessionMessage {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         },
@@ -167,6 +168,7 @@ fn proptest_session_header() -> impl Strategy<Value = SessionHeader> {
                 fallback_thinking_level: None,
                 current_leaf: None,
                 parent_session,
+                additional_roots: None,
             },
         )
 }
@@ -272,6 +274,7 @@ proptest! {
             fallback_thinking_level: None,
             current_leaf: None,
             parent_session: None,
+            additional_roots: None,
         };
         session.entries = decoded_entries;
         session._test_set_leaf_id(leaf_id);
@@ -441,12 +444,8 @@ fn plan_fork_from_user_message_branches_from_parent_and_returns_selected_text() 
         Some(root_assistant.as_str())
     );
 
-    let pi::session::ForkPlan {
-        entries, leaf_id, ..
-    } = plan;
     let mut forked = Session::create();
-    forked.entries = entries;
-    forked._test_set_leaf_id(leaf_id);
+    forked.init_from_fork_plan(plan);
 
     let appended = forked.append_message(make_user_message("Followup"));
     let appended_entry = forked.get_entry(&appended).expect("appended entry");
@@ -942,6 +941,7 @@ fn make_assistant_with_tool_use(
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         },

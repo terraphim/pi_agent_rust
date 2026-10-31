@@ -1,3 +1,8 @@
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
+
 //! Failure-injection E2E scenarios for provider streaming (bd-3uqg.8.8).
 //!
 //! Exercises failure paths that go beyond basic HTTP error codes:
@@ -53,6 +58,7 @@ fn make_entry(provider: &str, model_id: &str, base_url: &str) -> ModelEntry {
             reasoning: false,
             input: vec![InputType::Text],
             cost: ModelCost {
+                audio: None,
                 input: 0.0,
                 output: 0.0,
                 cache_read: 0.0,
@@ -527,6 +533,150 @@ fn http_503_service_unavailable() {
     results.push(classified);
 
     write_results(&harness, "http_503", &results);
+}
+
+/// #209: a terminal HTTP 503 from the provider must end the agent turn with a
+/// structured `provider_error` event (provider, HTTP status, kind, retryable)
+/// ahead of `agent_end`, and the interactive translation must turn that into
+/// a visible card rather than leaving the turn silent.
+#[test]
+fn http_503_turn_end_emits_structured_provider_error() {
+    use pi::agent::{Agent, AgentConfig, AgentEvent};
+    use pi::error::ProviderErrorKind;
+    use pi::tools::ToolRegistry;
+    use std::sync::Mutex;
+
+    let harness = TestHarness::new("http_503_turn_end_emits_structured_provider_error");
+    let (provider, _server) = setup_openai(
+        &harness,
+        make_response(
+            503,
+            "application/json",
+            br#"{"error":{"code":"service_unavailable_error","message":"Server Overloaded"}}"#,
+        ),
+    );
+    let cwd = harness.temp_dir().to_path_buf();
+
+    let (result, events) = common::run_async(async move {
+        let tools = ToolRegistry::new(&[], &cwd, None);
+        let config = AgentConfig {
+            stream_options: default_options(),
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::new(provider, tools, config);
+        let captured: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let result = agent
+            .run("Say hello.", move |event| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(event);
+            })
+            .await;
+        let events = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (result, events)
+    });
+
+    let err = result.expect_err("HTTP 503 must fail the turn");
+    assert!(
+        matches!(err, pi::error::Error::Provider { .. }),
+        "expected a provider error, got {err:?}"
+    );
+
+    let provider_error_index = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ProviderError { .. }))
+        .expect("provider_error event must be emitted");
+    let agent_end_index = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::AgentEnd { .. }))
+        .expect("agent_end event must be emitted");
+    assert!(
+        provider_error_index < agent_end_index,
+        "provider_error must precede agent_end"
+    );
+
+    let AgentEvent::ProviderError {
+        provider,
+        summary,
+        message,
+        ..
+    } = &events[provider_error_index]
+    else {
+        unreachable!("position() matched ProviderError");
+    };
+    assert_eq!(provider, "openai");
+    assert_eq!(summary.http_status, Some(503));
+    assert_eq!(summary.kind, ProviderErrorKind::Overloaded);
+    assert!(summary.retryable, "503 is retryable");
+    assert!(
+        message.contains("HTTP 503"),
+        "raw message must carry the status: {message}"
+    );
+
+    let AgentEvent::AgentEnd {
+        error: Some(agent_end_error),
+        ..
+    } = &events[agent_end_index]
+    else {
+        panic!("agent_end must carry the error");
+    };
+    assert!(agent_end_error.contains("HTTP 503"));
+
+    // JSON/RPC consumers see the structured fields on the wire.
+    let wire = serde_json::to_value(&events[provider_error_index]).expect("serialize event");
+    assert_eq!(wire["type"], "provider_error");
+    assert_eq!(wire["provider"], "openai");
+    assert_eq!(wire["httpStatus"], 503);
+    assert_eq!(wire["kind"], "overloaded");
+    assert_eq!(wire["retryable"], true);
+    assert!(
+        wire["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("HTTP 503"))
+    );
+
+    // The default (ftui) interactive stack renders the turn end as a card
+    // that names the provider, the status, and the retry situation.
+    #[cfg(feature = "ftui")]
+    {
+        let msgs = pi::interactive_ftui::agent_event_to_pi_msgs(&events[agent_end_index]);
+        let [
+            pi::interactive::PiMsg::AgentDone {
+                error_message: Some(card),
+                ..
+            },
+        ] = msgs.as_slice()
+        else {
+            panic!("agent_end must translate to AgentDone with an error card: {msgs:?}");
+        };
+        assert!(
+            card.starts_with("Provider error: openai: HTTP 503 (service unavailable / overloaded)"),
+            "card headline: {card}"
+        );
+        assert!(card.contains("not auto-retried"), "retry status: {card}");
+        assert!(
+            card.contains("Detail: OpenAI API error (HTTP 503)"),
+            "detail: {card}"
+        );
+    }
+
+    let path = harness.temp_path("provider_error_turn_end.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json!({
+            "event_count": events.len(),
+            "provider_error_index": provider_error_index,
+            "agent_end_index": agent_end_index,
+            "provider_error": wire,
+        }))
+        .expect("serialize artifact"),
+    )
+    .expect("write artifact");
+    harness.record_artifact("provider_error_turn_end.json", &path);
 }
 
 #[test]
@@ -1354,7 +1504,7 @@ fn anthropic_tool_use_stop_reason() {
     let sse = concat!(
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
-        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/tmp\\\"\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}}\n\n",
         "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":10}}\n\n",
         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
@@ -1362,10 +1512,12 @@ fn anthropic_tool_use_stop_reason() {
     let (provider, _server) = setup_anthropic(&harness, make_sse_response(sse));
     let r = collect_events(provider, simple_context(), default_options());
     let classified = classify_result("anthropic_tool_use_reason", "anthropic", &r);
-    // Should produce ToolCallStart/Delta/End events, then Done with ToolUse reason
+    // A complete tool_use block must terminate with Done and StopReason::ToolUse.
+    // The transport deliberately returns Err (not an Error event) for malformed
+    // argument JSON, so asserting on has_done_event alone would miss it.
     assert!(
-        classified.has_done_event || classified.has_error_event,
-        "Anthropic tool_use must produce terminal event"
+        classified.has_done_event && !classified.has_error_event,
+        "Anthropic tool_use must terminate with Done: {classified:?}"
     );
 
     let results = vec![classified];

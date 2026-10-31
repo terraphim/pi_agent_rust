@@ -1,3 +1,8 @@
+// Integration tests are separate crates, so src/lib.rs's `recursion_limit`
+// does not reach here; asupersync 0.5.0 nests its runtime future types deeply
+// enough that proving `Send` exceeds the default 128.
+#![recursion_limit = "256"]
+
 //! bd-kh2.2: E2E RPC extension session connector scenarios.
 //!
 //! Tests the RPC protocol's session-management commands end-to-end:
@@ -96,11 +101,26 @@ fn setup_rpc(
     Arc<Mutex<Receiver<String>>>,
     asupersync::runtime::JoinHandle<pi::error::Result<()>>,
 ) {
+    setup_rpc_with_save(session, runtime_handle, false)
+}
+
+/// Like [`setup_rpc`] but with session saving enabled, for tests that assert
+/// persistence diagnostics (a session whose saving is disabled truthfully
+/// reports `session.persistence.disabled`, never a backlog).
+fn setup_rpc_with_save(
+    session: Session,
+    runtime_handle: &asupersync::runtime::RuntimeHandle,
+    save_enabled: bool,
+) -> (
+    asupersync::channel::mpsc::Sender<String>,
+    Arc<Mutex<Receiver<String>>>,
+    asupersync::runtime::JoinHandle<pi::error::Result<()>>,
+) {
     let session = Arc::new(asupersync::sync::Mutex::new(session));
     let agent_session = AgentSession::new(
         dummy_agent(),
         session,
-        false,
+        save_enabled,
         pi::compaction::ResolvedCompactionSettings::default(),
     );
 
@@ -108,20 +128,24 @@ fn setup_rpc(
     let auth = AuthStorage::load(auth_dir.path().join("auth.json")).unwrap();
     let options = RpcOptions {
         config: Config::default(),
+        working_directory: None,
         resources: ResourceLoader::empty(false),
         available_models: Vec::new(),
         scoped_models: Vec::new(),
-        cli_api_key: None,
+        // Forking installs the forked session's model runtime, which needs a
+        // credential for a keyed provider; the dummy agent never sends it.
+        cli_api_key: Some("test-key".to_string()),
         auth,
         runtime_handle: runtime_handle.clone(),
+        ask_tool: None,
     };
 
     let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
     let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(1024);
     let out_rx = Arc::new(Mutex::new(out_rx));
 
-    let server =
-        runtime_handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+    let server = runtime_handle
+        .spawn(async move { Box::pin(run(agent_session, options, in_rx, out_tx)).await });
 
     (in_tx, out_rx, server)
 }
@@ -151,6 +175,7 @@ fn prepopulated_session() -> Session {
                 ..Usage::default()
             },
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: now,
         },
@@ -215,6 +240,7 @@ fn large_fork_session() -> (Session, String, String) {
                 model: "gpt-4o-mini".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: now + idx,
             },
@@ -727,6 +753,7 @@ fn rpc_get_session_stats_with_tool_calls() {
                     ..Usage::default()
                 },
                 stop_reason: StopReason::ToolUse,
+                stop_details: None,
                 error_message: None,
                 timestamp: now,
             },
@@ -754,6 +781,7 @@ fn rpc_get_session_stats_with_tool_calls() {
                     ..Usage::default()
                 },
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: now,
             },
@@ -810,7 +838,7 @@ fn rpc_get_session_stats_reports_durability_backlog_diagnostics() {
             "expected pending autosave backlog before RPC stats query"
         );
 
-        let (in_tx, out_rx, server) = setup_rpc(session, &handle);
+        let (in_tx, out_rx, server) = setup_rpc_with_save(session, &handle, true);
         let resp = send_recv(
             &in_tx,
             &out_rx,
@@ -895,7 +923,7 @@ fn rpc_get_session_stats_stays_responsive_with_backlog() {
             "expected large pending queue for responsiveness probe"
         );
 
-        let (in_tx, out_rx, server) = setup_rpc(session, &handle);
+        let (in_tx, out_rx, server) = setup_rpc_with_save(session, &handle, true);
 
         let mut max_roundtrip_ms = 0u128;
         for req_id in 0..8 {
@@ -1084,7 +1112,7 @@ fn rpc_fork_large_payload_state_budget() {
                 }
                 Some("fork") => {
                     assert_eq!(value["command"], "fork");
-                    assert_eq!(value["success"], true);
+                    assert_eq!(value["success"], true, "fork response: {value}");
                     assert_eq!(value["data"]["text"], target_text);
                     assert_eq!(value["data"]["cancelled"], false);
                     fork_seen = true;

@@ -15,7 +15,7 @@ capability-gated hostcall interface.
 
 | Module | Coverage | Key APIs |
 |--------|----------|----------|
-| `node:path` | Full | `join`, `dirname`, `resolve`, `basename`, `relative`, `isAbsolute`, `extname`, `normalize`, `parse`, `format`, `sep`, `delimiter`, `posix` |
+| `node:path` | Full | `join`, `dirname`, `resolve`, `basename`, `relative`, `isAbsolute`, `extname`, `normalize`, `parse`, `format`, `toNamespacedPath`, `sep`, `delimiter`, `posix`, `win32`; native platform default |
 | `node:os` | Full | `homedir`, `tmpdir`, `hostname`, `platform`, `arch`, `type`, `release`, `cpus`, `totalmem`, `freemem`, `uptime`, `loadavg`, `networkInterfaces`, `userInfo`, `endianness`, `EOL`, `devNull`, `constants` |
 | `node:fs` | Partial | `readFileSync`, `writeFileSync`, `existsSync`, `readdirSync`, `statSync`, `mkdirSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `symlinkSync`, `readlinkSync`, `realpathSync`, `copyFileSync`, `appendFileSync`, `chmodSync`/`chownSync` path checks, `accessSync`, `lstatSync`, `openSync`, `closeSync`, `readSync`, `writeSync`, `fstatSync`, `createReadStream`, `createWriteStream`, `promises.*`, callback variants |
 | `node:buffer` | Full | `Buffer.from`, `Buffer.alloc`, `Buffer.allocUnsafe`, `Buffer.concat`, `Buffer.isBuffer`, `Buffer.byteLength`, `toString(encoding)` (utf8, hex, base64, latin1, ascii) |
@@ -23,7 +23,7 @@ capability-gated hostcall interface.
 | `node:util` | Full | `inspect`, `promisify`, `callbackify`, `format`, `deprecate`, `inherits`, `debuglog`, `stripVTControlCharacters`, `types.*`, `TextEncoder`, `TextDecoder` |
 | `node:child_process` | Full | `spawn`, `spawnSync`, `execSync`, `exec`, `execFile`, `execFileSync`, `fork` (stub) |
 | `node:crypto` | Partial | `randomBytes`, `randomUUID`, `createHash` (SHA-256/SHA-384/SHA-512, SHA-1, MD5), `createHmac`, `timingSafeEqual`, `getHashes`, `pbkdf2`/`scrypt`, AES-128-GCM/AES-256-GCM `createCipheriv`/`createDecipheriv`, Ed25519 `sign`/`verify` |
-| `node:http` | Partial | `request`, `get`, `createServer` (stub), `STATUS_CODES`, `METHODS`, `IncomingMessage`, `ClientRequest` -- routes through `pi.http()` hostcall |
+| `node:http` | Partial | `request`, `get`, `STATUS_CODES`, `METHODS`, `IncomingMessage`, `ClientRequest`; outbound calls use `pi.http()`, explicit loopback `createServer` listeners are private in-memory routes |
 | `node:url` | Partial | `URL` (globalThis), `URLSearchParams`, `parse`, `format`, `resolve`, `fileURLToPath`, `pathToFileURL` |
 | `node:stream` | Partial | `Readable`, `Writable`, `Transform`, `PassThrough`, `Duplex`, `pipeline`, `finished` |
 | `node:net` | Stub | `createConnection` (stub), `Socket` (stub); `createServer` throws -- network APIs outside sandbox |
@@ -125,6 +125,14 @@ for optional features.
 | `ms` | Functional | Duration parsing (`ms("2h")` -> `7200000`) |
 | `glob` | Partial | `globSync`, `glob`, `Glob` class (basic `*`, `?`, `**` over VFS-known files) |
 | `jsonwebtoken` | Partial | `decode()`, HS256/HS384/HS512 `sign()`/`verify()`; asymmetric algorithms fail closed |
+| `undici` | Partial | Capability-gated `fetch`, `Headers`, `Response`; importing `Agent` works, constructing a custom dispatcher fails explicitly |
+
+PiJS leaves `process.versions.undici` unset so pi-freeflow 1.39.0 selects its
+global-fetch dispatcher fallback. Its local proxy runs as an extension-owned
+in-memory HTTP route, and its registered provider reaches that route through a
+scoped native transport. No OS listener or arbitrary npm resolution is added.
+See [the Freeflow compatibility contract](ext-compat.md#pi-freeflow-1390-and-optional-undici-dispatchers)
+for ownership, cancellation, resource limits, and regression-test details.
 
 ### No-op Stubs (Extension Loads, Feature Unavailable)
 
@@ -184,14 +192,18 @@ The Pi SDK virtual module provides the primary extension API surface.
 | `calculateCost()` | Function | Token cost calculation (uses `model.cost` × usage tokens) |
 | `getEnvApiKey(provider)` | Function | Capability-filtered environment key lookup |
 | `getOAuthApiKey(provider)` | Function | Unsupported in PiJS; fails closed |
-| `complete(model, messages, opts)` | Function | Unsupported in PiJS without a provider host bridge; fails closed |
-| `completeSimple(model, prompt, opts)` | Function | Unsupported in PiJS without a provider host bridge; fails closed |
+| `complete(model, messages, opts)` | Function | Runs through a registered API provider when `model.api` matches; otherwise uses the provider host bridge and fails closed if unavailable |
+| `completeSimple(model, prompt, opts)` | Function | Runs through a registered API provider when `model.api` matches; otherwise uses the provider host bridge and fails closed if unavailable |
+| `stream(model, context, opts)` | Function | Returns a registered API provider's assistant-message event stream, or a host-bridge stream for models without an API ID |
+| `streamSimple(model, context, opts)` | Function | Returns a registered API provider's simple assistant-message event stream, or a host-bridge stream for models without an API ID |
 | `createAssistantMessageEventStream()` | Function | Async-iterable assistant event stream factory for extension providers |
 | `streamSimpleAnthropic()` | Function | Unsupported in PiJS without a provider host bridge; fails closed |
 | `streamSimpleOpenAIResponses()` | Function | Unsupported in PiJS without a provider host bridge; fails closed |
 | `streamSimpleOpenAICompletions()` | Function | Unsupported in PiJS without a provider host bridge; fails closed |
 | `getProviders()`, `getModel(provider, modelId)`, `getModels(provider)` | Functions | Synchronous built-in registry lookup for bundled provider metadata; currently includes OpenAI Codex models needed by extension provider mirrors |
-| `getApiProvider(api)` | Function | Synchronous provider bridge for known API IDs; stream calls route through the host provider bridge and fail closed if unavailable |
+| `registerApiProvider(provider, sourceId)` | Function | Registers an extension-owned `{api, stream, streamSimple}` provider for compatibility-model routing |
+| `unregisterApiProviders(sourceId)` | Function | Removes only API providers registered by the calling extension with that source ID |
+| `getApiProvider(api)`, `getApiProviders()` | Function | Returns registered API providers; known built-in API IDs retain their synchronous host bridge fallback |
 | `getModel()`, `getApiProvider()`, `getModels()` with no lookup arguments | Functions | Session/model host-context helpers; fail closed when no host bridge is configured |
 
 ## Conformance Status

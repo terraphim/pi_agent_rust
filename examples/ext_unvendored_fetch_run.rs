@@ -35,7 +35,11 @@ struct Cli {
     command: CommandMode,
 }
 
+// A clap subcommand enum, parsed exactly once at startup and never stored in a
+// collection, so the variant size spread costs nothing. Boxing a variant is not
+// an option here: `Subcommand` derives onto the `Args` type directly.
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum CommandMode {
     /// Fetch and probe a corpus of candidates.
     RunAll(RunAllArgs),
@@ -738,12 +742,11 @@ fn fetch_candidate_source(
             let repo_slug =
                 github_repo_slug_from_url(repo).unwrap_or_else(|| sanitize_for_fs(repo));
             let (state, root) = fetch_github_repo(shared, repo, &repo_slug)?;
-            if let Some(rel) = path {
-                if let Some(adjusted) = resolve_candidate_subpath(&root, rel) {
-                    if adjusted.exists() {
-                        return Ok((state, adjusted));
-                    }
-                }
+            if let Some(rel) = path
+                && let Some(adjusted) = resolve_candidate_subpath(&root, rel)
+                && adjusted.exists()
+            {
+                return Ok((state, adjusted));
             }
             Ok((state, root))
         }
