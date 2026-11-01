@@ -13607,7 +13607,7 @@ mod retry_tests {
             let options = build_test_rpc_options(&handle, temp.path().join("auth.json"));
             let state = Arc::new(Mutex::new(RpcSharedState::new(&options.config)));
             let streaming = Arc::new(AtomicBool::new(true));
-            let (out_tx, out_rx) = std::sync::mpsc::sync_channel(32);
+            let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(32);
             run_prompt_with_retry(
                 session,
                 state,

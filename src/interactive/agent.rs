@@ -1031,7 +1031,6 @@ impl PiApp {
             PiMsg::UiShutdown
             | PiMsg::TerminalTitle(_)
             | PiMsg::AutocompleteCatalog(_)
-            | PiMsg::ResourcesReloaded { .. }
             | PiMsg::LoginPending { .. }
             | PiMsg::StatusSnapshot(_)
             | PiMsg::UserInputSubmitted { .. }
@@ -1824,10 +1823,12 @@ After approving access in the browser, press Enter in Pi to complete login."
             }
             PiMsg::ResourcesReloaded {
                 resources,
+                catalog,
                 status,
                 diagnostics,
             } => {
-                let mut autocomplete_catalog = AutocompleteCatalog::from_resources(&resources);
+                let resources = *resources;
+                let mut autocomplete_catalog = catalog;
                 if let Some(manager) = &self.extensions {
                     autocomplete_catalog.extension_commands =
                         extension_commands_for_catalog(manager);

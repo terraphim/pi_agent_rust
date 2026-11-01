@@ -2436,7 +2436,7 @@ impl PiApp {
                 self.status_message = Some("Starting new session...".to_string());
 
                 let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
-                runtime_handle.spawn(async move {
+                runtime_handle.spawn_local(async move {
                     let cancelled = if let Some(extensions) = &extensions {
                         extensions
                             .dispatch_cancellable_event(
@@ -4487,11 +4487,13 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                         let _ = write!(status, " ({diag_count} diagnostics)");
                     }
 
+                    let catalog = crate::autocomplete::AutocompleteCatalog::from_resources(&resources);
                     let _ = crate::interactive::enqueue_pi_event(
                         &event_tx,
                         &task_cx,
                         PiMsg::ResourcesReloaded {
-                            resources,
+                            resources: Box::new(resources),
+                            catalog,
                             status,
                             diagnostics,
                         },

@@ -1797,7 +1797,7 @@ fn load_themes_from_dir(
         return themes;
     }
 
-    for full_path in read_dir_sorted_paths(dir) {
+    for full_path in read_dir_sorted_paths_bounded(dir, usize::MAX).unwrap_or_default() {
         let (_, is_file) = resolved_path_kind(&full_path);
 
         if is_file
@@ -4115,7 +4115,7 @@ still frontmatter",
         fs::write(temp.path().join("z.md"), "z").expect("write z");
         fs::write(temp.path().join("a.md"), "a").expect("write a");
 
-        let names: Vec<String> = read_dir_sorted_paths(temp.path())
+        let names: Vec<String> = read_dir_sorted_paths_bounded(temp.path(), usize::MAX).unwrap_or_default()
             .into_iter()
             .map(|path| {
                 path.file_name()

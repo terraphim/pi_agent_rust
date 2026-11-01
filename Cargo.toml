@@ -480,6 +480,10 @@ harness = false
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }
 
+# FIFO creation helper on Apple targets (rustix 1.x gates mkfifo/mkfifoat off there).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 # FreeBSD: third-party libs live under /usr/local and rquickjs-sys doesn't
 # ship pre-generated bindings for this target, so regenerate at build time
 # via the `bindgen` feature (uses /usr/bin/clang from the base system).

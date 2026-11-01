@@ -2386,6 +2386,8 @@ async fn reload_driver_resources(
         |resources| PiMsg::ResourcesReloaded {
             resources,
             catalog: catalog.clone(),
+            status: String::new(),
+            diagnostics: None,
         },
     );
     let _ = agent_tx.send(update);
@@ -3840,7 +3842,7 @@ impl PiFtuiModel {
                 self.autocomplete.provider.set_catalog(catalog);
                 self.autocomplete.close();
             }
-            PiMsg::ResourcesReloaded { resources, catalog } => {
+            PiMsg::ResourcesReloaded { resources, catalog, .. } => {
                 self.steer_resources = Some(*resources);
                 self.extension_commands
                     .clone_from(&catalog.extension_commands);

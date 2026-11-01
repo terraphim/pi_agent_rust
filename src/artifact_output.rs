@@ -668,7 +668,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let target = resolve_new(root.path(), "result.bin", "test").unwrap();
-        rustix::fs::mkfifoat(rustix::fs::CWD, target.path(), Mode::RUSR | Mode::WUSR).unwrap();
+        crate::platform::create_fifo(target.path(), 0o600).unwrap();
         let worker_target = target.clone();
         let (send, receive) = mpsc::channel();
         let worker = std::thread::spawn(move || {

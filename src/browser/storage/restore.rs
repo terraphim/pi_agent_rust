@@ -484,12 +484,7 @@ mod tests {
         assert!(read_private(&owner, root.path(), "state.json").is_err());
         std::fs::create_dir(root.path().join("directory.json")).unwrap();
         assert!(read_private(&owner, root.path(), "directory.json").is_err());
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            root.path().join("pipe.json"),
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        crate::platform::create_fifo(root.path().join("pipe.json"), 0o600).unwrap();
         assert!(read_private(&owner, root.path(), "pipe.json").is_err());
     }
 

@@ -12464,7 +12464,7 @@ impl Tool for EditTool {
         }
 
         let source_expectation = AtomicContentExpectation::from_bytes(&raw);
-        let outcome = apply_file_text_replacement(&raw, &input, &path)?;
+        let outcome = apply_file_text_replacement(&raw, &input, &absolute_path)?;
         let final_content = outcome.final_content;
         let normalized_content = outcome.before_normalized;
         let new_content_for_diff = outcome.after_normalized;
@@ -18391,7 +18391,7 @@ impl Tool for HashlineEditTool {
             )
         })?;
 
-        let outcome = apply_file_hashline_edits(&raw_content, &input, &path)?;
+        let outcome = apply_file_hashline_edits(&raw_content, &input, &absolute_path)?;
         let final_content = outcome.final_content;
         let normalized = outcome.before_normalized;
         let new_normalized = outcome.after_normalized;

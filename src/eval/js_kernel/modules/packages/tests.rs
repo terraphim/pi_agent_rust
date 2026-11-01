@@ -400,12 +400,7 @@ fn in_workspace_package_links_work_but_escaping_links_and_special_manifests_fail
             .contains("PATH")
     );
     std::fs::create_dir(root.join("node_modules/pipe")).unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        root.join("node_modules/pipe/package.json"),
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    crate::platform::create_fifo(root.join("node_modules/pipe/package.json"), 0o600).unwrap();
     assert!(
         files
             .resolve_path("eval_script", "pipe")

@@ -2,6 +2,7 @@
 mod tests {
     use super::extensions_integration_tests::PiAiCaptureProvider;
     use super::*;
+    use crate::agent_cx::AgentCx;
     use crate::auth::AuthCredential;
     use crate::provider::{InputType, Model, ModelCost};
     use asupersync::runtime::RuntimeBuilder;
@@ -18,6 +19,19 @@ mod tests {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
         })
+    }
+
+    fn assistant_text_content(content: &[ContentBlock]) -> String {
+        let mut text = String::new();
+        for block in content {
+            if let ContentBlock::Text(part) = block {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&part.text);
+            }
+        }
+        text
     }
 
     fn queued_user_message(text: &str) -> QueuedAgentMessage {
@@ -201,6 +215,7 @@ mod tests {
                     total: self.provider_reported_total.unwrap_or(0.0),
                     ..crate::model::Cost::default()
                 },
+                billing: None,
             };
             Ok(Box::pin(futures::stream::iter([Ok(StreamEvent::Done {
                 reason: StopReason::Stop,
@@ -6920,7 +6935,7 @@ mod tests {
                 .expect("provider admission");
 
             agent_session
-                .apply_compaction_result(result, on_event, provider_admission, None, None)
+                .apply_compaction_result(result, on_event, provider_admission, None, None, None)
                 .await
                 .expect("apply compaction result");
 
@@ -7029,6 +7044,7 @@ mod tests {
                     provider_admission,
                     None,
                     None,
+                    None,
                 ),
             )
             .await
@@ -7111,7 +7127,7 @@ mod tests {
                 .expect("provider admission");
 
             let err = agent_session
-                .apply_compaction_result(result, on_event, provider_admission, None, None)
+                .apply_compaction_result(result, on_event, provider_admission, None, None, None)
                 .await
                 .expect_err("blocked persistence must fail");
             assert!(

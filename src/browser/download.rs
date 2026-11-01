@@ -647,12 +647,7 @@ mod tests {
         std::fs::write(&secret, b"secret").unwrap();
         symlink(&secret, dir.path().join("linked")).unwrap();
         assert!(read_completed(dir.path(), &completed_record("linked", 6.0)).is_err());
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            dir.path().join("fifo"),
-            Mode::RUSR | Mode::WUSR,
-        )
-        .unwrap();
+        crate::platform::create_fifo(dir.path().join("fifo"), 0o600).unwrap();
         assert!(read_completed(dir.path(), &completed_record("fifo", 0.0)).is_err());
     }
 }

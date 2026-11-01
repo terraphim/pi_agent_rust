@@ -283,6 +283,24 @@ pub fn pi_user_agent_with(extra: &str) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Create a FIFO special file at `path` with the given access `mode` (raw
+/// permission bits, e.g. `0o600`).
+pub(crate) fn create_fifo<P: AsRef<std::path::Path>>(path: P, mode: u32) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = path.as_ref();
+        std::os::unix::fs::mkfifo(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .map_err(std::io::Error::from)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = path.as_ref();
+        rustix::fs::mkfifoat(rustix::fs::CWD, path, rustix::fs::Mode::from_bits_retain(mode))
+            .map_err(std::io::Error::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,4 +389,6 @@ mod tests {
     fn aarch64_maps_to_arm64() {
         assert_eq!(arch_name(), "arm64");
     }
+
+
 }

@@ -1639,7 +1639,7 @@ impl PiApp {
         self.status_message = Some("Loading session...".to_string());
 
         let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
-        runtime_handle.spawn(async move {
+        runtime_handle.spawn_local(async move {
             if let Some(manager) = extensions.clone() {
                 let cancelled = manager
                     .dispatch_cancellable_event(
@@ -2086,6 +2086,8 @@ pub enum PiMsg {
     ResourcesReloaded {
         resources: Box<crate::resources::ResourceLoader>,
         catalog: crate::autocomplete::AutocompleteCatalog,
+        status: String,
+        diagnostics: Option<String>,
     },
     /// Text delta from assistant.
     TextDelta(String),
@@ -2237,12 +2239,6 @@ pub enum PiMsg {
     SessionEventRetry {
         event: Box<Self>,
         attempts_remaining: u8,
-    },
-    /// Reloaded skills/prompts/themes/extensions.
-    ResourcesReloaded {
-        resources: ResourceLoader,
-        status: String,
-        diagnostics: Option<String>,
     },
     /// Extension UI request (select/confirm/input/editor/custom/notify).
     ExtensionUiRequest(ExtensionUiRequest),

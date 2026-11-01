@@ -282,12 +282,7 @@ mod tests {
         std::fs::write(dir.path().join("outside.js"), "42").unwrap();
         std::os::unix::fs::symlink(dir.path().join("outside.js"), root.join("escape.js")).unwrap();
         assert!(load_sync(&root, Path::new("escape.js")).is_err());
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            root.join("pipe.js"),
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        crate::platform::create_fifo(root.join("pipe.js"), 0o600).unwrap();
         assert!(load_sync(&root, Path::new("pipe.js")).is_err());
     }
 }

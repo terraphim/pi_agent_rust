@@ -472,7 +472,7 @@ mod tests {
                 assert_eq!(result.get("taskFile"), Some(&json!(source)));
                 assert_eq!(
                     result.get("taskFileSha256"),
-                    Some(&json!(format!("{:x}", Sha256::digest(original.as_bytes()))))
+                    Some(&json!(Sha256::digest(original.as_bytes()).iter().map(|b| format!("{:02x}", b)).collect::<String>()))
                 );
             });
         }

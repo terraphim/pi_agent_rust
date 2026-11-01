@@ -22,6 +22,7 @@
 // Assigning a Job during creation keeps even the child's first descendants
 // inside its cancellation boundary, including when Pi is used as a library.
 #![cfg_attr(windows, feature(windows_process_extensions_raw_attribute))]
+#![cfg_attr(target_os = "macos", feature(unix_mkfifo))]
 // Raised from the default 128 because the RPC command dispatcher's nested
 // async blocks exceed it while the compiler proves `Send` for the spawned
 // future (src/rpc.rs:2057, `run_extension_command` inside

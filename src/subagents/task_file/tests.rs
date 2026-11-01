@@ -70,7 +70,7 @@ fn snapshot_preserves_original_utf8_bytes_and_is_not_reread() {
     let mut task = task(path.to_str().expect("path"));
     prepare(&tool, std::iter::once(&mut task), deadline()).expect("snapshot");
     assert_eq!(task.task, original);
-    let digest = format!("{:x}", Sha256::digest(original.as_bytes()));
+    let digest = Sha256::digest(original.as_bytes()).iter().map(|b| format!("{:02x}", b)).collect::<String>();
     assert_eq!(task.task_file_sha256.as_deref(), Some(digest.as_str()));
     std::fs::write(&path, "changed after admission").expect("replace source");
     prepare(&tool, std::iter::once(&mut task), deadline()).expect("retain snapshot");
@@ -161,7 +161,7 @@ fn symlink_escapes_unreadable_files_and_fifos_are_rejected() {
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).expect("mode");
 
     let fifo = root.path().join("fifo.md");
-    rustix::fs::mkfifo(&fifo, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR).expect("fifo");
+    crate::platform::create_fifo(&fifo, 0o600).expect("fifo");
     let mut special = task(fifo.to_str().expect("path"));
     assert!(prepare(&tool, std::iter::once(&mut special), deadline()).is_err());
 }
