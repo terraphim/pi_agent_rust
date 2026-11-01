@@ -1639,7 +1639,7 @@ impl PiApp {
         self.status_message = Some("Loading session...".to_string());
 
         let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
-        runtime_handle.spawn_local(async move {
+        let _ = runtime_handle.spawn_local(async move {
             if let Some(manager) = extensions.clone() {
                 let cancelled = manager
                     .dispatch_cancellable_event(

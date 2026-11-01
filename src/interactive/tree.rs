@@ -464,7 +464,7 @@ impl PiApp {
         self.status_message = Some("Forking session...".to_string());
 
         let runtime_handle = self.runtime_handle.clone();
-        runtime_handle.spawn_local(async move {
+        let _ = runtime_handle.spawn_local(async move {
             let cx = asupersync::Cx::for_request();
             if let Some(manager) = extensions.clone() {
                 let cancelled = manager

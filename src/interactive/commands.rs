@@ -2436,7 +2436,7 @@ impl PiApp {
                 self.status_message = Some("Starting new session...".to_string());
 
                 let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
-                runtime_handle.spawn_local(async move {
+                let _ = runtime_handle.spawn_local(async move {
                     let cancelled = if let Some(extensions) = &extensions {
                         extensions
                             .dispatch_cancellable_event(
